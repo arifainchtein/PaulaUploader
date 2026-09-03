@@ -64,6 +64,50 @@ public class PaulaSerialLink {
 		return response != null && response.contains("Left=") && response.contains("Right=");
 	}
 
+	// Bench-verification helper (Main "diagnose-ports") - prints every serial port the OS sees,
+	// flags which ones match Wally's CP2104 vendor/product ID, probes each candidate, and reports
+	// the raw response so the two-device disambiguation fix can be checked directly against real
+	// hardware without needing a job loaded first.
+	public static void diagnosePorts() {
+		SerialPort[] ports = SerialPort.getCommPorts();
+		if (ports.length == 0) {
+			System.out.println("No serial ports found at all.");
+			return;
+		}
+		System.out.println("Serial ports found: " + ports.length);
+		List<SerialPort> candidates = new ArrayList<SerialPort>();
+		for (SerialPort port : ports) {
+			boolean isCp2104 = port.getVendorID() == WALLY_VENDOR_ID && port.getProductID() == WALLY_PRODUCT_ID;
+			System.out.println("  " + port.getSystemPortName()
+					+ "  vid=0x" + Integer.toHexString(port.getVendorID())
+					+ " pid=0x" + Integer.toHexString(port.getProductID())
+					+ (isCp2104 ? "  <- CP2104 candidate" : ""));
+			if (isCp2104) candidates.add(port);
+		}
+
+		if (candidates.isEmpty()) {
+			System.out.println("No CP2104 candidates found - is Wally plugged in?");
+			return;
+		}
+
+		System.out.println("Probing " + candidates.size() + " CP2104 candidate(s) with GetSwitchState...");
+		SerialPort resolvedWally = null;
+		for (SerialPort candidate : candidates) {
+			String response = sendCommandOnPort(candidate, "GetSwitchState", PROBE_TIMEOUT_MILLISECONDS);
+			boolean paulaShaped = response != null && response.contains("Left=") && response.contains("Right=");
+			System.out.println("  " + candidate.getSystemPortName() + " -> "
+					+ (response == null ? "(no response within " + PROBE_TIMEOUT_MILLISECONDS + "ms)" : "\"" + response.replace("\n", "\\n") + "\"")
+					+ (paulaShaped ? "  => Paula-shaped, this is Paula" : "  => not Paula-shaped"));
+			if (paulaShaped && resolvedWally == null) {
+				resolvedWally = candidate;
+			}
+		}
+
+		System.out.println(resolvedWally != null
+				? "Result: " + resolvedWally.getSystemPortName() + " identified as Paula's controller."
+				: "Result: none of the CP2104 candidates identified as Paula - findWallyPort() would return null.");
+	}
+
 	// Sends SetStatusText#<text> to Paula's OLED and waits for Ok/Failure. Returns the response
 	// line, or null if Wally isn't plugged in / the ESP32 never replied.
 	public String setStatusText(String text) {

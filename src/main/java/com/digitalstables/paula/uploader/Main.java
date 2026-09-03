@@ -25,6 +25,10 @@ import org.json.JSONObject;
 //                             the device is plugged in; "press PROGRAM/RESET now" prompts are
 //                             signalled on the Pi's onboard LED as well as stdout, for when nobody
 //                             is watching the SSH session at that exact moment.
+//   diagnose-ports          - bench-verification: lists every serial port the OS sees, flags
+//                             CP2104 candidates, probes each with GetSwitchState, and reports
+//                             which one (if any) resolves as Paula. No job/network needed - just
+//                             exercises PaulaSerialLink.findWallyPort()'s disambiguation directly.
 //   sync-push [nucBaseUrl]  - run back at the office
 //
 // Default nucBaseUrl is http://factoryserver.local
@@ -36,7 +40,7 @@ public class Main {
 
 	public static void main(String[] args) throws Exception {
 		if (args.length == 0) {
-			System.out.println("Usage: paulauploader <sync-pull|flash|watch-flash|flash-direct|sync-push> [arg]");
+			System.out.println("Usage: paulauploader <sync-pull|flash|watch-flash|flash-direct|diagnose-ports|sync-push> [arg]");
 			return;
 		}
 
@@ -56,12 +60,15 @@ public class Main {
 			case "flash-direct":
 				flashDirect();
 				break;
+			case "diagnose-ports":
+				PaulaSerialLink.diagnosePorts();
+				break;
 			case "sync-push":
 				syncPush(args.length > 1 ? args[1] : DEFAULT_NUC_BASE_URL);
 				break;
 			default:
 				System.out.println("Unknown command: " + command);
-				System.out.println("Usage: paulauploader <sync-pull|flash|watch-flash|flash-direct|sync-push> [arg]");
+				System.out.println("Usage: paulauploader <sync-pull|flash|watch-flash|flash-direct|diagnose-ports|sync-push> [arg]");
 		}
 	}
 
