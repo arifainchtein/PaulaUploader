@@ -1,3 +1,6 @@
 target/
 *.class
 paulauploader-work/
+.classpath
+.project
+.settings/

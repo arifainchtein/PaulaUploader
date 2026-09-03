@@ -23,14 +23,30 @@ public class FirmwareFlasher {
 	private static final String ESPTOOL_PATH = "/home/ari/.arduino15/packages/esp32/tools/esptool_py/3.0.0/esptool.py";
 	private static final String BOOT_APP0_PATH = "/home/ari/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions/boot_app0.bin";
 	private static final String BOOTLOADER_PATH = "/home/ari/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin/bootloader_dio_80m.bin";
+	// Pinned deliberately, do not "helpfully" bump this. Confirmed at the bench (both
+	// apt-installed and freshly pip-installed) that esptool 4.7.0 silently wipes this board's
+	// entire NVS partition (device name, CSW calibration, everything) on every flash, even
+	// restricted to these same four offsets. esptool 3.0.0 does not have this problem.
 
 	private static final int DATA_RATE = 115200;
 	private static final int READ_TIMEOUT_MILLISECONDS = 500;
 	private static final int MAX_WAIT_MILLISECONDS = 30000;
 
-	// Any ttyUSB*/ttyACM* port that isn't Wally's CP2104 is assumed to be the target device.
+	// Two-device setup (a separate Paula/Wally controller plus the target device): any
+	// ttyUSB*/ttyACM* port that isn't Wally's CP2104 is assumed to be the target.
 	public SerialPort findTargetPort() {
-		SerialPort wally = PaulaSerialLink.findWallyPort();
+		return findTargetPort(true);
+	}
+
+	// excludeWallyPort=false is for the single-device field scenario - Pi 3B with one USB cable
+	// into one Wally board, which IS the target, no separate controller plugged in at all. With
+	// exclusion left on in that setup, findWallyPort() matches that same Wally's CP2104 (Wally's
+	// own carrier board uses one too, confirmed against its KiCad schematic) and excludes the
+	// only port present, leaving nothing to flash - this parameter is the fix. Main.flashDirect()
+	// calls this with false; the two-device flash()/watch-flash path keeps the old exclude-Wally
+	// behavior via the no-arg overload above.
+	public SerialPort findTargetPort(boolean excludeWallyPort) {
+		SerialPort wally = excludeWallyPort ? PaulaSerialLink.findWallyPort() : null;
 		for (SerialPort port : SerialPort.getCommPorts()) {
 			String name = port.getSystemPortName();
 			if (wally != null && port.getSystemPortName().equals(wally.getSystemPortName())) {
@@ -44,7 +60,11 @@ public class FirmwareFlasher {
 	}
 
 	public boolean flash(String binPath, String partitionsPath, String workDir) throws IOException, InterruptedException {
-		SerialPort targetPort = findTargetPort();
+		return flash(binPath, partitionsPath, workDir, true);
+	}
+
+	public boolean flash(String binPath, String partitionsPath, String workDir, boolean excludeWallyPort) throws IOException, InterruptedException {
+		SerialPort targetPort = findTargetPort(excludeWallyPort);
 		if (targetPort == null) {
 			System.out.println("No target device found - is it plugged in?");
 			return false;
@@ -78,8 +98,10 @@ public class FirmwareFlasher {
 			System.out.println("esptool: " + line);
 			if (line.startsWith("Serial port")) {
 				System.out.println("*** PRESS PROGRAM NOW ***");
+				PiStatusLed.blinkForProgramPrompt();
 			} else if (line.startsWith("Hard resetting via RTS")) {
 				System.out.println("*** PRESS RESET NOW ***");
+				PiStatusLed.blinkForResetPrompt();
 				Thread.sleep(5000);
 			}
 		}
@@ -93,13 +115,21 @@ public class FirmwareFlasher {
 	// Same bounded-poll send/wait-for-Ok-or-Failure pattern as PaulaSerialLink, pointed at the
 	// just-flashed device instead of Wally.
 	public String pingTarget() {
-		SerialPort port = findTargetPort();
+		return pingTarget(true);
+	}
+
+	public String pingTarget(boolean excludeWallyPort) {
+		SerialPort port = findTargetPort(excludeWallyPort);
 		if (port == null) return null;
 		return sendCommand(port, "Ping");
 	}
 
 	public String getTargetIpAddress() {
-		SerialPort port = findTargetPort();
+		return getTargetIpAddress(true);
+	}
+
+	public String getTargetIpAddress(boolean excludeWallyPort) {
+		SerialPort port = findTargetPort(excludeWallyPort);
 		if (port == null) return null;
 		return sendCommand(port, "GetIpAddress");
 	}

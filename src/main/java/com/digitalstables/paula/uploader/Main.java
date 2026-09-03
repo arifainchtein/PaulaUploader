@@ -16,6 +16,15 @@ import org.json.JSONObject;
 //   watch-flash [timeoutMinutes] - run before leaving the office (nohup'd); blocks until the
 //                             switch is flipped away from its start position and back again in
 //                             the field, then flashes. Default timeout 240 minutes.
+//   flash-direct            - single-device mode: Pi 3B + one USB cable into one Wally board,
+//                             which IS the target being upgraded - no separate Paula controller,
+//                             no OLED, no switch gesture. Skips PaulaSerialLink entirely (nothing
+//                             to talk to) and does not exclude Wally's own CP2104 port when
+//                             looking for the target, unlike flash/watch-flash which assume a
+//                             second, separate device is present. Run this directly over SSH once
+//                             the device is plugged in; "press PROGRAM/RESET now" prompts are
+//                             signalled on the Pi's onboard LED as well as stdout, for when nobody
+//                             is watching the SSH session at that exact moment.
 //   sync-push [nucBaseUrl]  - run back at the office
 //
 // Default nucBaseUrl is http://factoryserver.local
@@ -27,7 +36,7 @@ public class Main {
 
 	public static void main(String[] args) throws Exception {
 		if (args.length == 0) {
-			System.out.println("Usage: paulauploader <sync-pull|flash|watch-flash|sync-push> [arg]");
+			System.out.println("Usage: paulauploader <sync-pull|flash|watch-flash|flash-direct|sync-push> [arg]");
 			return;
 		}
 
@@ -44,12 +53,15 @@ public class Main {
 				int timeoutMinutes = args.length > 1 ? Integer.parseInt(args[1]) : DEFAULT_WATCH_TIMEOUT_MINUTES;
 				watchFlash(timeoutMinutes);
 				break;
+			case "flash-direct":
+				flashDirect();
+				break;
 			case "sync-push":
 				syncPush(args.length > 1 ? args[1] : DEFAULT_NUC_BASE_URL);
 				break;
 			default:
 				System.out.println("Unknown command: " + command);
-				System.out.println("Usage: paulauploader <sync-pull|flash|watch-flash|sync-push> [arg]");
+				System.out.println("Usage: paulauploader <sync-pull|flash|watch-flash|flash-direct|sync-push> [arg]");
 		}
 	}
 
@@ -184,6 +196,40 @@ public class Main {
 				: job.getString("productname") + " FAILED - will retry next attempt";
 		System.out.println(status);
 		paula.setStatusText(status);
+	}
+
+	// Single-device mode: Pi 3B + one USB cable into the one Wally board being upgraded, no
+	// separate Paula controller. Deliberately does not touch PaulaSerialLink at all - there's
+	// nothing to talk to - and passes excludeWallyPort=false through to FirmwareFlasher so the
+	// only serial device present (this Wally, on its own CP2104) is treated as the target instead
+	// of being mistaken for "the Paula controller" and excluded.
+	private static void flashDirect() throws Exception {
+		DeploymentStore store = new DeploymentStore();
+		FirmwareFlasher flasher = new FirmwareFlasher();
+
+		JSONObject job = store.getCurrentJob();
+		if (job == null) {
+			System.out.println("No job loaded - run sync-pull first.");
+			return;
+		}
+
+		System.out.println("Flashing " + job.getString("productname") + " (single-device mode)...");
+
+		String workDir = new File(job.getString("binpath")).getParent();
+		boolean flashOk = flasher.flash(job.getString("binpath"), job.getString("partitionspath"), workDir, false);
+
+		boolean success = false;
+		if (flashOk) {
+			String ping = flasher.pingTarget(false);
+			success = ping != null && ping.contains("Ok");
+		}
+
+		store.recordResult(job.getInt("deploymentid"), job.getInt("productid"), success,
+				job.getInt("firmwareid"), job.getInt("firmwareversion"));
+
+		System.out.println(success
+				? job.getString("productname") + " flashed OK - remember to Sync when back at the office"
+				: job.getString("productname") + " FAILED - will retry next attempt");
 	}
 
 	private static void syncPush(String nucBaseUrl) throws Exception {
