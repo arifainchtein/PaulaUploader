@@ -5,6 +5,8 @@ import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.util.ArrayList;
+import java.util.List;
 
 import com.fazecast.jSerialComm.SerialPort;
 
@@ -15,23 +17,51 @@ import com.fazecast.jSerialComm.SerialPort;
 // something that can import the factory webapp's classes directly.
 public class PaulaSerialLink {
 
-	// Silicon Labs CP2104 - identifies Wally's port reliably regardless of enumeration order,
-	// and disambiguates it from whatever port the target device being flashed shows up as, now
-	// that the Pi has several serial-capable USB devices plugged in at once.
+	// Silicon Labs CP2104 - Wally's own carrier board (both Paula's controller AND any
+	// Wally-carrier-based target device, e.g. Daffodil-family units) uses this exact chip for its
+	// USB-serial link, confirmed against Wally's KiCad schematic. So vendor/product ID alone
+	// cannot tell "Paula's controller" apart from "a Wally-carrier target plugged in for
+	// flashing" when both are connected at once - findWallyPort() below disambiguates by
+	// behavior instead (see its comment).
 	private static final int WALLY_VENDOR_ID = 0x10C4;
 	private static final int WALLY_PRODUCT_ID = 0xEA60;
 
 	private static final int DATA_RATE = 115200;
 	private static final int READ_TIMEOUT_MILLISECONDS = 500;
 	private static final int MAX_WAIT_MILLISECONDS = 30000;
+	// Short bound for the disambiguation probe below - just needs to see whether a candidate
+	// port replies in Paula's shape, not carry out a real command round-trip.
+	private static final int PROBE_TIMEOUT_MILLISECONDS = 3000;
 
+	// Cached per-instance so a tight polling loop (watch-flash checks the switch roughly twice a
+	// second) doesn't re-probe every candidate CP2104 port on every single call - resolved once,
+	// reused until the cached port disappears from the OS's port list (unplugged) or a command on
+	// it times out, either of which clears the cache so the next call re-resolves.
+	private SerialPort cachedWallyPort;
+
+	// Gathers every CP2104 candidate and probes each with GetSwitchState (Paula-specific - a
+	// generic Daffodil/Wally target running product firmware won't recognize it and won't reply
+	// with the "Left=...#Right=...#Sleep=..." data line Paula's firmware sends). Whichever
+	// candidate answers in that shape is treated as Paula; any other CP2104 port is left alone
+	// for FirmwareFlasher to consider as a possible target instead of being blanket-excluded.
 	public static SerialPort findWallyPort() {
+		List<SerialPort> candidates = new ArrayList<SerialPort>();
 		for (SerialPort port : SerialPort.getCommPorts()) {
 			if (port.getVendorID() == WALLY_VENDOR_ID && port.getProductID() == WALLY_PRODUCT_ID) {
-				return port;
+				candidates.add(port);
+			}
+		}
+		for (SerialPort candidate : candidates) {
+			if (probeForPaula(candidate)) {
+				return candidate;
 			}
 		}
 		return null;
+	}
+
+	private static boolean probeForPaula(SerialPort port) {
+		String response = sendCommandOnPort(port, "GetSwitchState", PROBE_TIMEOUT_MILLISECONDS);
+		return response != null && response.contains("Left=") && response.contains("Right=");
 	}
 
 	// Sends SetStatusText#<text> to Paula's OLED and waits for Ok/Failure. Returns the response
@@ -56,23 +86,44 @@ public class PaulaSerialLink {
 		return null;
 	}
 
-	// Sends a command and returns every line Paula replied with (data line(s) plus the final
-	// Ok/Failure acknowledgement), newline-joined - callers that only care about the
-	// acknowledgement can just check the result contains "Ok", but commands like GetSwitchState
-	// that reply with a data line before the acknowledgement need the whole transcript, not just
-	// the last line (this used to return only the last line, silently dropping the data).
+	// Sends a command to the (cached, disambiguated) Wally port and returns every line Paula
+	// replied with (data line(s) plus the final Ok/Failure acknowledgement), newline-joined -
+	// callers that only care about the acknowledgement can just check the result contains "Ok",
+	// but commands like GetSwitchState that reply with a data line before the acknowledgement
+	// need the whole transcript, not just the last line.
 	public String sendCommand(String command) {
-		SerialPort port = findWallyPort();
+		SerialPort port = resolveWallyPort();
 		if (port == null) {
 			System.out.println("Wally not found on any USB port - is it plugged in?");
 			return null;
 		}
+		String result = sendCommandOnPort(port, command, MAX_WAIT_MILLISECONDS);
+		if (result == null) {
+			// Could mean the device was power-cycled or swapped - drop the cache so the next
+			// call re-probes rather than keep trusting a port that just went quiet.
+			cachedWallyPort = null;
+		}
+		return result;
+	}
 
+	private SerialPort resolveWallyPort() {
+		if (cachedWallyPort != null) {
+			for (SerialPort port : SerialPort.getCommPorts()) {
+				if (port.getSystemPortName().equals(cachedWallyPort.getSystemPortName())) {
+					return cachedWallyPort;
+				}
+			}
+			cachedWallyPort = null; // no longer enumerated - unplugged, re-resolve below
+		}
+		cachedWallyPort = findWallyPort();
+		return cachedWallyPort;
+	}
+
+	private static String sendCommandOnPort(SerialPort port, String command, int timeoutMillis) {
 		port.setComPortParameters(DATA_RATE, 8, SerialPort.ONE_STOP_BIT, SerialPort.NO_PARITY);
 		port.setComPortTimeouts(SerialPort.TIMEOUT_READ_SEMI_BLOCKING, READ_TIMEOUT_MILLISECONDS, 0);
 
 		if (!port.openPort()) {
-			System.out.println("Failed to open Wally's serial port " + port.getSystemPortName());
 			return null;
 		}
 
@@ -84,7 +135,7 @@ public class PaulaSerialLink {
 			output.flush();
 
 			StringBuilder transcript = new StringBuilder();
-			long deadline = System.currentTimeMillis() + MAX_WAIT_MILLISECONDS;
+			long deadline = System.currentTimeMillis() + timeoutMillis;
 			while (System.currentTimeMillis() < deadline) {
 				if (input.ready()) {
 					String line = input.readLine();
@@ -96,12 +147,10 @@ public class PaulaSerialLink {
 						}
 					}
 				}
-				Thread.sleep(200);
+				Thread.sleep(100);
 			}
-			System.out.println("Timed out waiting for Paula's response to " + command);
 			return null;
 		} catch (IOException | InterruptedException e) {
-			System.out.println("Error talking to Wally: " + e.getMessage());
 			return null;
 		} finally {
 			try { input.close(); } catch (IOException e) { /* ignore */ }
