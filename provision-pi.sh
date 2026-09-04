@@ -110,7 +110,28 @@ fi
 echo "Built-in radio (hotspot): $BUILTIN_WIFI"
 echo "USB adapter (factory network): ${USB_WIFI:-none detected - plug it in and re-run if you want FactoryNet set up now}"
 
-echo "== Writing field-WiFi config: hostapd+dnsmasq AP on $BUILTIN_WIFI, wpa_supplicant client on ${USB_WIFI:-<none>} =="
+echo "== Pinning interface names by MAC address (udev) so adding/removing the USB adapter later can't reshuffle which radio is which =="
+# Kernel interface names (wlan0, wlan1, ...) are assigned by enumeration order at boot, which is
+# NOT guaranteed stable once hardware changes - confirmed the hard way 2026-09-04: plugging the
+# USB adapter in after the first provisioning run and rebooting reshuffled which device got which
+# name, silently pointing hostapd at the wrong radio (or the wrong radio at nothing at all).
+# Pinning by MAC address via udev makes the logical names below permanent regardless of what's
+# plugged in when, or in what order devices probe at boot.
+AP_IFACE="wlan-hotspot"
+CLIENT_IFACE="wlan-factory"
+BUILTIN_MAC=$(cat "/sys/class/net/$BUILTIN_WIFI/address")
+sudo tee /etc/udev/rules.d/70-paula-wifi.rules > /dev/null <<EOF
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="${BUILTIN_MAC}", NAME="${AP_IFACE}"
+EOF
+if [ -n "$USB_WIFI" ]; then
+  USB_MAC=$(cat "/sys/class/net/$USB_WIFI/address")
+  echo "SUBSYSTEM==\"net\", ACTION==\"add\", ATTR{address}==\"${USB_MAC}\", NAME=\"${CLIENT_IFACE}\"" | sudo tee -a /etc/udev/rules.d/70-paula-wifi.rules > /dev/null
+fi
+# Takes effect on the reboot at the end of this script, same as everything else below - from here
+# on, use the pinned logical names ($AP_IFACE / $CLIENT_IFACE) in every config file, not the
+# current kernel names ($BUILTIN_WIFI / $USB_WIFI), which only apply to *this* boot.
+
+echo "== Writing field-WiFi config: hostapd+dnsmasq AP on $AP_IFACE, wpa_supplicant client on ${USB_WIFI:+$CLIENT_IFACE} =="
 # Plain hostapd/dnsmasq/wpa_supplicant/systemd-networkd, not NetworkManager/nmcli - see the
 # comment block at the top of this script for why. Every file below is just written to disk and
 # every service just enabled (not started) - nothing live changes until the reboot at the very
@@ -118,12 +139,12 @@ echo "== Writing field-WiFi config: hostapd+dnsmasq AP on $BUILTIN_WIFI, wpa_sup
 
 sudo tee /etc/NetworkManager/conf.d/99-unmanaged-wifi.conf > /dev/null <<EOF
 [keyfile]
-unmanaged-devices=interface-name:${BUILTIN_WIFI}$( [ -n "$USB_WIFI" ] && echo ";interface-name:${USB_WIFI}" )
+unmanaged-devices=interface-name:${AP_IFACE}$( [ -n "$USB_WIFI" ] && echo ";interface-name:${CLIENT_IFACE}" )
 EOF
 
-sudo tee "/etc/systemd/network/10-${BUILTIN_WIFI}-ap.network" > /dev/null <<EOF
+sudo tee "/etc/systemd/network/10-${AP_IFACE}-ap.network" > /dev/null <<EOF
 [Match]
-Name=${BUILTIN_WIFI}
+Name=${AP_IFACE}
 
 [Network]
 Address=192.168.50.1/24
@@ -144,7 +165,7 @@ else
   echo "   anywhere you don't control access to. Re-run with FIELD_PASSWORD set to secure it."
 fi
 sudo tee /etc/hostapd/hostapd.conf > /dev/null <<EOF
-interface=${BUILTIN_WIFI}
+interface=${AP_IFACE}
 driver=nl80211
 ssid=${FIELD_SSID}
 hw_mode=g
@@ -160,7 +181,7 @@ grep -q '^DAEMON_CONF=' /etc/default/hostapd 2>/dev/null \
 sudo systemctl unmask hostapd
 
 sudo tee /etc/dnsmasq.d/wlan-ap.conf > /dev/null <<EOF
-interface=${BUILTIN_WIFI}
+interface=${AP_IFACE}
 bind-interfaces
 dhcp-range=192.168.50.10,192.168.50.100,255.255.255.0,24h
 EOF
@@ -170,15 +191,15 @@ sudo systemctl enable hostapd
 sudo systemctl enable dnsmasq
 
 if [ -n "$USB_WIFI" ]; then
-  sudo tee "/etc/systemd/network/20-${USB_WIFI}-client.network" > /dev/null <<EOF
+  sudo tee "/etc/systemd/network/20-${CLIENT_IFACE}-client.network" > /dev/null <<EOF
 [Match]
-Name=${USB_WIFI}
+Name=${CLIENT_IFACE}
 
 [Network]
 DHCP=yes
 EOF
   if [ -n "$FACTORY_WIFI_SSID" ]; then
-    echo "== $USB_WIFI will join factory network '$FACTORY_WIFI_SSID' on next boot =="
+    echo "== $CLIENT_IFACE will join factory network '$FACTORY_WIFI_SSID' on next boot =="
     NETBLOCK="network={
     ssid=\"${FACTORY_WIFI_SSID}\"
     key_mgmt=NONE
@@ -189,17 +210,17 @@ EOF
     psk=\"${FACTORY_WIFI_PASSWORD}\"
 }"
     fi
-    sudo tee "/etc/wpa_supplicant/wpa_supplicant-${USB_WIFI}.conf" > /dev/null <<EOF
+    sudo tee "/etc/wpa_supplicant/wpa_supplicant-${CLIENT_IFACE}.conf" > /dev/null <<EOF
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
 update_config=1
 country=${WIFI_COUNTRY}
 
 ${NETBLOCK}
 EOF
-    sudo systemctl enable "wpa_supplicant@${USB_WIFI}.service"
+    sudo systemctl enable "wpa_supplicant@${CLIENT_IFACE}.service"
   else
-    echo "FACTORY_WIFI_SSID not set - $USB_WIFI is configured for DHCP but has no network to join yet."
-    echo "Set FACTORY_WIFI_SSID and re-run, or write /etc/wpa_supplicant/wpa_supplicant-${USB_WIFI}.conf yourself."
+    echo "FACTORY_WIFI_SSID not set - $CLIENT_IFACE is configured for DHCP but has no network to join yet."
+    echo "Set FACTORY_WIFI_SSID and re-run, or write /etc/wpa_supplicant/wpa_supplicant-${CLIENT_IFACE}.conf yourself."
   fi
 else
   echo "No USB WiFi adapter detected - skipping factory-network client setup. Plug one in and re-run to add it."
