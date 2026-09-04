@@ -243,6 +243,19 @@ create table if not exists deploymentResult(
 );
 "
 
+echo "== Ensure this Pi has an SSH key trusted by the NUC (needed for the rsync fetch below) =="
+if [ ! -f "$NUC_KEY" ]; then
+  echo "No key at $NUC_KEY yet - generating one now."
+  ssh-keygen -t ed25519 -f "$NUC_KEY" -N ""
+fi
+if ! ssh -o BatchMode=yes -o ConnectTimeout=5 -i "$NUC_KEY" "${NUC_USER}@${NUC_HOST}" true 2>/dev/null; then
+  echo "This Pi's key isn't installed on the NUC yet (or the NUC isn't reachable right now)."
+  echo "If the NUC is reachable, run this once, then re-run this script:"
+  echo "  ssh-copy-id -i ${NUC_KEY}.pub ${NUC_USER}@${NUC_HOST}"
+  echo "(it'll ask for ${NUC_USER}'s NUC password once, then never again)"
+  exit 1
+fi
+
 echo "== Fetching esptool + bootloader files from the NUC (matches FirmwareFlasher's hardcoded paths) =="
 mkdir -p "$HOME/.arduino15/packages/esp32/tools/esptool_py/3.0.0"
 mkdir -p "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions"
