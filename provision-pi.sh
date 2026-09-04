@@ -15,20 +15,29 @@
 #
 # Field WiFi (optional but recommended - lets you SSH in from a phone in the field with no other
 # network available): the Pi's built-in radio hosts its own AP, a USB WiFi adapter joins the
-# factory network. Built with plain hostapd + dnsmasq + wpa_supplicant + systemd-networkd, NOT
-# NetworkManager/nmcli (confirmed 2026-09-04, the hard way: nmcli's live reconfiguration of an
-# interface you're actively SSH'd through - which is unavoidable when the only way to reach this
-# Pi at all is the very radio being reconfigured - repeatedly killed the controlling session and,
-# with it, the still-foreground provisioning script; a config-files-plus-one-reboot approach has
-# no live transition to survive). The hotspot is always set up as long as FIELD_SSID resolves to
-# something (it has a default below) - FIELD_PASSWORD is optional: set it for a WPA2-secured
-# hotspot, or leave it blank/unset for an OPEN hotspot (no password - anyone in range can join and
-# get a shell on this Pi, so only do this somewhere that's acceptable). FACTORY_WIFI_PASSWORD is
-# optional the same way - blank/unset joins an open factory network instead of a secured one. e.g.:
+# factory network. Built with the classic ifupdown + hostapd + dnsmasq + wpa_supplicant stack
+# (/etc/network/interfaces, /etc/rc.local), NOT NetworkManager and NOT systemd-networkd - ported
+# directly from ~/Data/Teleonome/digitalgeppettowebapp's CreateTeleonome.sh /
+# network_with_internal_mode.sh, a dual-WiFi (AP + client) setup proven working in the field for
+# years. Two earlier approaches both failed here in practice (2026-09-04): NetworkManager/nmcli's
+# live reconfiguration of the interface you're actually SSH'd through kept killing the controlling
+# session mid-change; a systemd-networkd + wpa_supplicant@.service + udev-renaming approach fixed
+# that but hit a *different* problem - wpa_supplicant@.service has no built-in wait for its device
+# to exist, so a USB radio slower to enumerate than the built-in one could race it and silently
+# fail. ifupdown sidesteps both: nothing here is started live (see the reboot note below), and
+# /etc/rc.local (also written below) brings both radios up at the very end of boot with explicit
+# retries, so there's no unit-ordering race to lose. The hotspot is always set up as long as
+# FIELD_SSID resolves to something (it has a default below) - FIELD_PASSWORD is optional: set it
+# for a WPA2-secured hotspot, or leave it blank/unset for an OPEN hotspot (no password - anyone in
+# range can join and get a shell on this Pi, so only do this somewhere that's acceptable).
+# FACTORY_WIFI_PASSWORD is optional the same way - blank/unset joins an open factory network
+# instead of a secured one. e.g.:
 #   FIELD_PASSWORD='something-real' FACTORY_WIFI_SSID='OfficeWifi' FACTORY_WIFI_PASSWORD='...' ./provision-pi.sh
 #   FACTORY_WIFI_SSID='OfficeWifi' ./provision-pi.sh   # open hotspot, open factory network
-# The built-in radio is identified by its driver (brcmfmac) rather than assumed to be wlan0 -
-# interface enumeration order isn't guaranteed, so this no longer matters which one comes up first.
+# The built-in radio is identified by its driver (brcmfmac) each run and whatever literal kernel
+# name it currently has (wlan0, wlan1, ...) is written directly into the config files - same as
+# the proven Teleonome pattern this is ported from. If you add/remove the USB adapter later and
+# reboot, re-run this script so it re-detects and rewrites the config with the current names.
 # WIFI_COUNTRY (default AU) sets both radios' regulatory domain - required for the built-in radio
 # to transmit at all; override if provisioning outside Australia.
 #
@@ -39,9 +48,9 @@
 #
 # This script writes every config file and enables every service it needs, then reboots on its
 # own at the very end - nothing WiFi-related is started live, on purpose (see the note above), so
-# there's no live network transition to babysit over SSH. After it reboots (30-45s), join the
-# FIELD_SSID network and: ssh <user>@192.168.50.1 - then test with
-# java -jar ~/paulauploader/target/paulauploader.jar sync-pull
+# there's no live network transition to babysit over SSH. After it reboots (30-45s, /etc/rc.local
+# needs its own retry-sleeps to finish), join the FIELD_SSID network and: ssh <user>@192.168.50.1
+# - then test with java -jar ~/paulauploader/target/paulauploader.jar sync-pull
 
 set -euo pipefail
 
@@ -67,17 +76,20 @@ else
 fi
 sudo setupcon --force 2>/dev/null || echo "   (setupcon not available yet - will take effect after first boot's console-setup runs)"
 
-echo "== Installing JDK, Maven, PostgreSQL, Python, git, NetworkManager, hostapd, dnsmasq, curl =="
+echo "== Installing JDK, Maven, PostgreSQL, Python, git, ifupdown, hostapd, dnsmasq, curl =="
 sudo apt-get update
-sudo apt-get install -y default-jdk maven postgresql python3 python3-pip python-is-python3 rsync git network-manager hostapd dnsmasq curl
+sudo apt-get install -y default-jdk maven postgresql python3 python3-pip python-is-python3 rsync git curl \
+  ifupdown isc-dhcp-client wpasupplicant hostapd dnsmasq
 
-echo "== Ensure NetworkManager is actually running (still handles Ethernet/general networking) =="
-sudo systemctl enable --now NetworkManager
-for i in $(seq 1 10); do
-  nmcli general status >/dev/null 2>&1 && break
-  sleep 1
-done
-nmcli general status >/dev/null 2>&1 || { echo "NetworkManager did not come up after 10s - check 'systemctl status NetworkManager'."; exit 1; }
+echo "== Disabling NetworkManager - using the classic ifupdown/wpa_supplicant/hostapd stack instead =="
+# Ported directly from ~/Data/Teleonome/digitalgeppettowebapp's CreateTeleonome.sh /
+# network_with_internal_mode.sh, a dual-WiFi (AP + client) setup that's been working in the field
+# for years. NetworkManager's live reconfiguration and systemd-networkd/wpa_supplicant@.service's
+# lack of any built-in wait-for-device ordering both caused real, repeated failures earlier
+# (2026-09-04) - ifupdown + a retrying /etc/rc.local (below) sidesteps both problems entirely by
+# just not depending on systemd unit ordering being right at all.
+sudo systemctl disable --now NetworkManager 2>/dev/null || true
+sudo systemctl mask NetworkManager 2>/dev/null || true
 
 echo "== Ensure SSH is enabled =="
 sudo systemctl enable ssh
@@ -88,13 +100,13 @@ sudo systemctl enable ssh
 sudo systemctl start ssh || echo "   (ssh.service didn't (re)start - sshd is very likely already listening on :22 from earlier; harmless, continuing)"
 
 echo "== Detecting WiFi interfaces (built-in radio vs USB adapter) =="
-# Don't assume wlan0=built-in/wlan1=USB - that's only the normal default boot order, not
-# guaranteed. Identify the built-in radio by its driver (brcmfmac, Broadcom - what every Pi's
-# onboard WiFi uses) instead of by enumeration order; whatever other wifi device shows up (if
-# any) is treated as the USB adapter.
+# Identify the built-in radio by its driver (brcmfmac, Broadcom - what every Pi's onboard WiFi
+# uses) instead of by enumeration order; whatever other wifi device shows up (if any) is treated
+# as the USB adapter. Pure sysfs, no NetworkManager/nmcli dependency (disabled above).
 BUILTIN_WIFI=""
 USB_WIFI=""
-for dev in $(nmcli -t -f DEVICE,TYPE device status | awk -F: '$2=="wifi"{print $1}'); do
+for dev in $(ls /sys/class/net); do
+  [ -d "/sys/class/net/$dev/wireless" ] || continue
   driver=$(basename "$(readlink -f "/sys/class/net/$dev/device/driver" 2>/dev/null)" 2>/dev/null || true)
   if [ "$driver" = "brcmfmac" ] && [ -z "$BUILTIN_WIFI" ]; then
     BUILTIN_WIFI="$dev"
@@ -104,91 +116,46 @@ for dev in $(nmcli -t -f DEVICE,TYPE device status | awk -F: '$2=="wifi"{print $
 done
 if [ -z "$BUILTIN_WIFI" ]; then
   echo "Could not identify a brcmfmac (built-in) WiFi radio - falling back to wlan0 for the hotspot."
-  echo "Run 'nmcli device status' yourself to check this is right before trusting the hotspot."
   BUILTIN_WIFI="wlan0"
 fi
 echo "Built-in radio (hotspot): $BUILTIN_WIFI"
 echo "USB adapter (factory network): ${USB_WIFI:-none detected - plug it in and re-run if you want FactoryNet set up now}"
+# These are the CURRENT boot's kernel names, used directly below (no renaming, no MAC pinning) -
+# ported as-is from the proven Teleonome pattern, which does the same. If you add/remove the USB
+# adapter later, re-run this script so it re-detects and rewrites these files with the current
+# names, same as you would on a Teleonome.
 
-echo "== Pinning interface names by MAC address (udev) so adding/removing the USB adapter later can't reshuffle which radio is which =="
-# Kernel interface names (wlan0, wlan1, ...) are assigned by enumeration order at boot, which is
-# NOT guaranteed stable once hardware changes - confirmed the hard way 2026-09-04: plugging the
-# USB adapter in after the first provisioning run and rebooting reshuffled which device got which
-# name, silently pointing hostapd at the wrong radio (or the wrong radio at nothing at all).
-# Pinning by MAC address via udev makes the logical names below permanent regardless of what's
-# plugged in when, or in what order devices probe at boot.
-AP_IFACE="wlan-hotspot"
-CLIENT_IFACE="wlan-factory"
-sudo rm -f /etc/udev/rules.d/70-paula-wifi.rules  # superseded by the .link files below - a leftover copy from an earlier run would otherwise race against them
-BUILTIN_MAC=$(cat "/sys/class/net/$BUILTIN_WIFI/address")
-# systemd .link files (not raw udev NAME= rules) - the officially documented mechanism for
-# persistent interface naming (systemd.link(5)), applied earlier and more reliably by
-# systemd-udevd than a hand-written udev rule.
-sudo tee "/etc/systemd/network/1-${AP_IFACE}.link" > /dev/null <<EOF
-[Match]
-MACAddress=${BUILTIN_MAC}
+echo "== Writing field-WiFi config: hostapd+dnsmasq AP on $BUILTIN_WIFI, wpa_supplicant client on ${USB_WIFI:-<none>} =="
+# Classic ifupdown/hostapd/dnsmasq/wpa_supplicant stack, ported from
+# ~/Data/Teleonome/digitalgeppettowebapp/src/main/webapp/ConfigFiles/:Teleonome/network_with_internal_mode.sh
+# and its referenced /etc files - proven working in the field. Every file below is just written to
+# disk; nothing is started live here - the /etc/rc.local written further down does all the actual
+# interface bring-up, at the very end of boot, with retries, after the reboot at the end of this
+# script.
+sudo tee /etc/network/interfaces > /dev/null <<EOF
+source-directory /etc/network/interfaces.d
 
-[Link]
-Name=${AP_IFACE}
+auto lo
+iface lo inet loopback
+
+allow-hotplug eth0
+iface eth0 inet dhcp
+
+allow-hotplug ${BUILTIN_WIFI}
+iface ${BUILTIN_WIFI} inet static
+address 192.168.50.1
+netmask 255.255.255.0
+network 192.168.50.0
+broadcast 192.168.50.255
 EOF
-
-# Confirmed bug (2026-09-04): even with the rename itself working, a USB-attached radio can still
-# be mid-enumeration (driver probe, rename) when wpa_supplicant@<iface>.service's default unit
-# tries to start - it has no built-in wait for the device to exist, so it fails silently once and
-# never retries. Symptom: `ifconfig` shows the (correctly renamed) interface, but it never
-# associates or gets an IP. Force explicit ordering on the matching udev .device unit so the
-# service actually waits, rather than racing it. Belt-and-braces on hostapd too, in case the
-# built-in radio is ever slower to appear (hasn't been observed, but the built-in radio initializing
-# fast is what let hostapd "accidentally" win the race so far, not anything the config guaranteed).
-sudo mkdir -p /etc/systemd/system/hostapd.service.d
-AP_DEVICE_UNIT=$(systemd-escape -p --suffix=device "/sys/subsystem/net/devices/${AP_IFACE}")
-sudo tee /etc/systemd/system/hostapd.service.d/wait-for-device.conf > /dev/null <<EOF
-[Unit]
-After=${AP_DEVICE_UNIT}
-Requires=${AP_DEVICE_UNIT}
-EOF
-
 if [ -n "$USB_WIFI" ]; then
-  USB_MAC=$(cat "/sys/class/net/$USB_WIFI/address")
-  sudo tee "/etc/systemd/network/1-${CLIENT_IFACE}.link" > /dev/null <<EOF
-[Match]
-MACAddress=${USB_MAC}
+  sudo tee -a /etc/network/interfaces > /dev/null <<EOF
 
-[Link]
-Name=${CLIENT_IFACE}
-EOF
-  sudo mkdir -p "/etc/systemd/system/wpa_supplicant@${CLIENT_IFACE}.service.d"
-  CLIENT_DEVICE_UNIT=$(systemd-escape -p --suffix=device "/sys/subsystem/net/devices/${CLIENT_IFACE}")
-  sudo tee "/etc/systemd/system/wpa_supplicant@${CLIENT_IFACE}.service.d/wait-for-device.conf" > /dev/null <<EOF
-[Unit]
-After=${CLIENT_DEVICE_UNIT}
-Requires=${CLIENT_DEVICE_UNIT}
+allow-hotplug ${USB_WIFI}
+iface ${USB_WIFI} inet dhcp
+wpa-conf /etc/wpa_supplicant/wpa_supplicant.conf
 EOF
 fi
-# Takes effect on the reboot at the end of this script, same as everything else below - from here
-# on, use the pinned logical names ($AP_IFACE / $CLIENT_IFACE) in every config file, not the
-# current kernel names ($BUILTIN_WIFI / $USB_WIFI), which only apply to *this* boot.
-
-echo "== Writing field-WiFi config: hostapd+dnsmasq AP on $AP_IFACE, wpa_supplicant client on ${USB_WIFI:+$CLIENT_IFACE} =="
-# Plain hostapd/dnsmasq/wpa_supplicant/systemd-networkd, not NetworkManager/nmcli - see the
-# comment block at the top of this script for why. Every file below is just written to disk and
-# every service just enabled (not started) - nothing live changes until the reboot at the very
-# end of this script, so there's no in-progress network transition to lose an SSH session over.
-
-sudo tee /etc/NetworkManager/conf.d/99-unmanaged-wifi.conf > /dev/null <<EOF
-[keyfile]
-unmanaged-devices=interface-name:${AP_IFACE}$( [ -n "$USB_WIFI" ] && echo ";interface-name:${CLIENT_IFACE}" )
-EOF
-
-sudo tee "/etc/systemd/network/10-${AP_IFACE}-ap.network" > /dev/null <<EOF
-[Match]
-Name=${AP_IFACE}
-
-[Network]
-Address=192.168.50.1/24
-DHCP=no
-IPForward=no
-EOF
 
 HOSTAPD_EXTRA=""
 if [ -n "$FIELD_PASSWORD" ]; then
@@ -203,66 +170,89 @@ else
   echo "   anywhere you don't control access to. Re-run with FIELD_PASSWORD set to secure it."
 fi
 sudo tee /etc/hostapd/hostapd.conf > /dev/null <<EOF
-interface=${AP_IFACE}
+interface=${BUILTIN_WIFI}
 driver=nl80211
+ctrl_interface=/var/run/hostapd
+ctrl_interface_group=0
 ssid=${FIELD_SSID}
 hw_mode=g
 channel=6
 country_code=${WIFI_COUNTRY}
-auth_algs=1
+ieee80211n=1
 wmm_enabled=1
+macaddr_acl=0
+auth_algs=1
 ${HOSTAPD_EXTRA}
 EOF
 grep -q '^DAEMON_CONF=' /etc/default/hostapd 2>/dev/null \
   && sudo sed -i 's|^DAEMON_CONF=.*|DAEMON_CONF="/etc/hostapd/hostapd.conf"|' /etc/default/hostapd \
   || echo 'DAEMON_CONF="/etc/hostapd/hostapd.conf"' | sudo tee -a /etc/default/hostapd > /dev/null
 sudo systemctl unmask hostapd
+sudo systemctl disable hostapd 2>/dev/null || true   # brought up by /etc/rc.local instead, not systemd at boot
 
-sudo tee /etc/dnsmasq.d/wlan-ap.conf > /dev/null <<EOF
-interface=${AP_IFACE}
+sudo tee /etc/dnsmasq.conf > /dev/null <<EOF
+interface=${BUILTIN_WIFI}
+listen-address=192.168.50.1
 bind-interfaces
-dhcp-range=192.168.50.10,192.168.50.100,255.255.255.0,24h
+domain-needed
+bogus-priv
+dhcp-range=192.168.50.10,192.168.50.100,255.255.255.0,12h
 EOF
+sudo systemctl disable dnsmasq 2>/dev/null || true   # same - rc.local restarts it after hostapd is up
 
-sudo systemctl enable systemd-networkd
-sudo systemctl enable hostapd
-sudo systemctl enable dnsmasq
-
-if [ -n "$USB_WIFI" ]; then
-  sudo tee "/etc/systemd/network/20-${CLIENT_IFACE}-client.network" > /dev/null <<EOF
-[Match]
-Name=${CLIENT_IFACE}
-
-[Network]
-DHCP=yes
-EOF
-  if [ -n "$FACTORY_WIFI_SSID" ]; then
-    echo "== $CLIENT_IFACE will join factory network '$FACTORY_WIFI_SSID' on next boot =="
-    NETBLOCK="network={
+if [ -n "$USB_WIFI" ] && [ -n "$FACTORY_WIFI_SSID" ]; then
+  echo "== $USB_WIFI will join factory network '$FACTORY_WIFI_SSID' on next boot =="
+  NETBLOCK="network={
     ssid=\"${FACTORY_WIFI_SSID}\"
     key_mgmt=NONE
 }"
-    if [ -n "$FACTORY_WIFI_PASSWORD" ]; then
-      NETBLOCK="network={
+  if [ -n "$FACTORY_WIFI_PASSWORD" ]; then
+    NETBLOCK="network={
     ssid=\"${FACTORY_WIFI_SSID}\"
     psk=\"${FACTORY_WIFI_PASSWORD}\"
 }"
-    fi
-    sudo tee "/etc/wpa_supplicant/wpa_supplicant-${CLIENT_IFACE}.conf" > /dev/null <<EOF
+  fi
+  sudo tee /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null <<EOF
+country=${WIFI_COUNTRY}
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
 update_config=1
-country=${WIFI_COUNTRY}
 
 ${NETBLOCK}
 EOF
-    sudo systemctl enable "wpa_supplicant@${CLIENT_IFACE}.service"
-  else
-    echo "FACTORY_WIFI_SSID not set - $CLIENT_IFACE is configured for DHCP but has no network to join yet."
-    echo "Set FACTORY_WIFI_SSID and re-run, or write /etc/wpa_supplicant/wpa_supplicant-${CLIENT_IFACE}.conf yourself."
-  fi
+elif [ -n "$USB_WIFI" ]; then
+  echo "FACTORY_WIFI_SSID not set - $USB_WIFI has no network to join yet."
+  echo "Set FACTORY_WIFI_SSID and re-run, or write /etc/wpa_supplicant/wpa_supplicant.conf yourself."
 else
   echo "No USB WiFi adapter detected - skipping factory-network client setup. Plug one in and re-run to add it."
 fi
+
+echo "== Writing /etc/rc.local to bring both radios up at the end of every boot, with retries =="
+# Ported directly from Teleonome's working rc.local.withinternal: bringing the AP interface up
+# with explicit retries, THEN restarting hostapd/dnsmasq, THEN cycling the client interface, all
+# at the very end of boot - this is what actually avoids the startup-ordering races that hit
+# systemd-managed equivalents (confirmed 2026-09-04).
+sudo tee /etc/rc.local > /dev/null <<EOF
+#!/bin/sh -e
+ifup ${BUILTIN_WIFI} || true
+sleep 5
+ifup ${BUILTIN_WIFI} || true
+sleep 2
+service hostapd restart
+sleep 3
+service dnsmasq restart
+sleep 2
+EOF
+if [ -n "$USB_WIFI" ]; then
+  sudo tee -a /etc/rc.local > /dev/null <<EOF
+ifdown ${USB_WIFI} || true
+sleep 2
+ifup ${USB_WIFI} || true
+sleep 2
+EOF
+fi
+echo "exit 0" | sudo tee -a /etc/rc.local > /dev/null
+sudo chmod +x /etc/rc.local
+sudo systemctl enable rc-local 2>/dev/null || true
 
 echo "== Serial port access without root - dialout group =="
 sudo usermod -a -G dialout "$USER"
