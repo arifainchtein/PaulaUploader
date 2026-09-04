@@ -343,18 +343,20 @@ else
 fi
 mvn -f "$HOME/paulauploader/pom.xml" package
 
-echo "== Installing Tomcat for the field-operations webapp (planned - not built yet as of this writing) =="
+echo "== Installing Tomcat for PaulaDeployer (the field-operations webapp, ~/Data/DigitalStables/PaulaDeployer) =="
 # 8.5.100 specifically (not "latest 9.x/10.x/11.x") to match the factory NUC's own Tomcat
 # (confirmed running 8.5.78) - same javax.servlet.* API (Tomcat 10+ switched to jakarta.servlet.*,
 # a breaking rename), so anything modeled on the factory webapp's ProcessingFormHandler pattern
 # drops in without a namespace mismatch. Note: the 8.5.x line is EOL (final release, no more
 # security patches) - accepted tradeoff for API compatibility with the existing factory webapp,
 # but worth knowing if this is meant to run somewhere internet-exposed.
-# Self-contained tarball extraction into the project folder rather than `apt install tomcatN` -
-# keeps the exact version pinned regardless of whatever Trixie's own package happens to ship, and
-# keeps it alongside the rest of this project rather than scattered into system directories.
+# Lives under ~/pauladeployer, not ~/paulauploader - a separate directory for PaulaDeployer (the
+# webapp Tomcat actually serves) rather than nested inside this CLI tool's own project folder,
+# even though this script (PaulaUploader's own) is what provisions it. Self-contained tarball
+# extraction rather than `apt install tomcatN` - keeps the exact version pinned regardless of
+# whatever Trixie's own package happens to ship.
 TOMCAT_VERSION="8.5.100"
-TOMCAT_DIR="$HOME/paulauploader/tomcat"
+TOMCAT_DIR="$HOME/pauladeployer/tomcat"
 if [ ! -d "$TOMCAT_DIR" ]; then
   TOMCAT_TARBALL="/tmp/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
   curl -fsSL -o "$TOMCAT_TARBALL" \
