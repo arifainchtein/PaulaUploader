@@ -119,13 +119,51 @@ echo "== Pinning interface names by MAC address (udev) so adding/removing the US
 # plugged in when, or in what order devices probe at boot.
 AP_IFACE="wlan-hotspot"
 CLIENT_IFACE="wlan-factory"
+sudo rm -f /etc/udev/rules.d/70-paula-wifi.rules  # superseded by the .link files below - a leftover copy from an earlier run would otherwise race against them
 BUILTIN_MAC=$(cat "/sys/class/net/$BUILTIN_WIFI/address")
-sudo tee /etc/udev/rules.d/70-paula-wifi.rules > /dev/null <<EOF
-SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="${BUILTIN_MAC}", NAME="${AP_IFACE}"
+# systemd .link files (not raw udev NAME= rules) - the officially documented mechanism for
+# persistent interface naming (systemd.link(5)), applied earlier and more reliably by
+# systemd-udevd than a hand-written udev rule.
+sudo tee "/etc/systemd/network/1-${AP_IFACE}.link" > /dev/null <<EOF
+[Match]
+MACAddress=${BUILTIN_MAC}
+
+[Link]
+Name=${AP_IFACE}
 EOF
+
+# Confirmed bug (2026-09-04): even with the rename itself working, a USB-attached radio can still
+# be mid-enumeration (driver probe, rename) when wpa_supplicant@<iface>.service's default unit
+# tries to start - it has no built-in wait for the device to exist, so it fails silently once and
+# never retries. Symptom: `ifconfig` shows the (correctly renamed) interface, but it never
+# associates or gets an IP. Force explicit ordering on the matching udev .device unit so the
+# service actually waits, rather than racing it. Belt-and-braces on hostapd too, in case the
+# built-in radio is ever slower to appear (hasn't been observed, but the built-in radio initializing
+# fast is what let hostapd "accidentally" win the race so far, not anything the config guaranteed).
+sudo mkdir -p /etc/systemd/system/hostapd.service.d
+AP_DEVICE_UNIT=$(systemd-escape -p --suffix=device "/sys/subsystem/net/devices/${AP_IFACE}")
+sudo tee /etc/systemd/system/hostapd.service.d/wait-for-device.conf > /dev/null <<EOF
+[Unit]
+After=${AP_DEVICE_UNIT}
+Requires=${AP_DEVICE_UNIT}
+EOF
+
 if [ -n "$USB_WIFI" ]; then
   USB_MAC=$(cat "/sys/class/net/$USB_WIFI/address")
-  echo "SUBSYSTEM==\"net\", ACTION==\"add\", ATTR{address}==\"${USB_MAC}\", NAME=\"${CLIENT_IFACE}\"" | sudo tee -a /etc/udev/rules.d/70-paula-wifi.rules > /dev/null
+  sudo tee "/etc/systemd/network/1-${CLIENT_IFACE}.link" > /dev/null <<EOF
+[Match]
+MACAddress=${USB_MAC}
+
+[Link]
+Name=${CLIENT_IFACE}
+EOF
+  sudo mkdir -p "/etc/systemd/system/wpa_supplicant@${CLIENT_IFACE}.service.d"
+  CLIENT_DEVICE_UNIT=$(systemd-escape -p --suffix=device "/sys/subsystem/net/devices/${CLIENT_IFACE}")
+  sudo tee "/etc/systemd/system/wpa_supplicant@${CLIENT_IFACE}.service.d/wait-for-device.conf" > /dev/null <<EOF
+[Unit]
+After=${CLIENT_DEVICE_UNIT}
+Requires=${CLIENT_DEVICE_UNIT}
+EOF
 fi
 # Takes effect on the reboot at the end of this script, same as everything else below - from here
 # on, use the pinned logical names ($AP_IFACE / $CLIENT_IFACE) in every config file, not the
