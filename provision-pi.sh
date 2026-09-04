@@ -5,6 +5,14 @@
 #   chmod +x provision-pi.sh
 #   ./provision-pi.sh
 #
+# IMPORTANT: run this from the Pi's own local keyboard/monitor if you can, not over SSH from
+# another machine. This script disables NetworkManager partway through and reboots at the end -
+# both can drop a remote SSH session riding on the WiFi connection being reconfigured, which kills
+# this still-foreground script along with it before it finishes (confirmed in practice). If SSH is
+# your only option, background it instead so a dropped connection can't take the script down:
+#   nohup ./provision-pi.sh > provision.log 2>&1 &
+#   disown
+#
 # Builds on the Pi itself from a git clone (JDK + Maven), rather than building elsewhere and
 # copying a jar over - set REPO_URL below (or export it) to your GitHub repo once it exists.
 #
