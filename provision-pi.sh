@@ -248,6 +248,11 @@ if [ ! -f "$NUC_KEY" ]; then
   echo "No key at $NUC_KEY yet - generating one now."
   ssh-keygen -t ed25519 -f "$NUC_KEY" -N ""
 fi
+# If this key was copied in manually (e.g. reusing an existing key from another machine) rather
+# than generated fresh above, its permissions often don't survive the copy - ssh silently refuses
+# a group/world-readable private key rather than erroring clearly, which looks identical to "not
+# trusted yet" from the check below. Fix it unconditionally rather than trying to detect it.
+chmod 600 "$NUC_KEY"
 if ! ssh -o BatchMode=yes -o ConnectTimeout=5 -i "$NUC_KEY" "${NUC_USER}@${NUC_HOST}" true 2>/dev/null; then
   echo "This Pi's key isn't installed on the NUC yet (or the NUC isn't reachable right now)."
   echo "If the NUC is reachable, run this once, then re-run this script:"
