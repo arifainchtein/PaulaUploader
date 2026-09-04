@@ -45,7 +45,7 @@
 
 set -euo pipefail
 
-NUC_HOST="${NUC_HOST:-192.168.1.137}"
+NUC_HOST="${NUC_HOST:-192.168.1.138}"
 NUC_USER="${NUC_USER:-ari}"
 NUC_KEY="${NUC_KEY:-$HOME/.ssh/chilhuacle}"
 REPO_URL="${REPO_URL:-git@github.com:arifainchtein/PaulaUploader.git}"
