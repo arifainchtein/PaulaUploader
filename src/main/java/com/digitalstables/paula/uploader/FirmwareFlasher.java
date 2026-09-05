@@ -20,9 +20,9 @@ import com.fazecast.jSerialComm.SerialPort;
 // path convention for this to work.
 public class FirmwareFlasher {
 
-	private static final String ESPTOOL_PATH = "/home/ari/.arduino15/packages/esp32/tools/esptool_py/3.0.0/esptool.py";
-	private static final String BOOT_APP0_PATH = "/home/ari/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions/boot_app0.bin";
-	private static final String BOOTLOADER_PATH = "/home/ari/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin/bootloader_dio_80m.bin";
+	private static final String ESPTOOL_PATH = "/home/pi/.arduino15/packages/esp32/tools/esptool_py/3.0.0/esptool.py";
+	private static final String BOOT_APP0_PATH = "/home/pi/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions/boot_app0.bin";
+	private static final String BOOTLOADER_PATH = "/home/pi/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin/bootloader_dio_80m.bin";
 	// Pinned deliberately, do not "helpfully" bump this. Confirmed at the bench (both
 	// apt-installed and freshly pip-installed) that esptool 4.7.0 silently wipes this board's
 	// entire NVS partition (device name, CSW calibration, everything) on every flash, even
