@@ -383,6 +383,34 @@ else
   echo "Tomcat already present at $TOMCAT_DIR - leaving it as-is (delete the folder and re-run to reinstall)."
 fi
 
+echo "== Installing a systemd service so Tomcat starts automatically on every boot =="
+# Confirmed gotcha (2026-09-05): without this, Tomcat only ever ran when someone manually SSH'd
+# in and ran startup.sh - fine on a bench, useless in the field where there's no monitor/keyboard
+# and a power cycle (or a crash) would otherwise leave PaulaDeployer silently unreachable with no
+# way to notice short of trying to load it. Type=forking + CATALINA_PID lets systemd track the
+# actual java process via Tomcat's own startup.sh/shutdown.sh rather than needing catalina.sh's
+# foreground "run" mode. Restart=on-failure so a crash also self-heals without a manual visit.
+sudo tee /etc/systemd/system/pauladeployer-tomcat.service > /dev/null <<EOF
+[Unit]
+Description=Tomcat for PaulaDeployer
+After=network.target postgresql.service
+
+[Service]
+Type=forking
+User=pi
+Environment=CATALINA_HOME=$TOMCAT_DIR
+Environment=CATALINA_PID=$TOMCAT_DIR/temp/tomcat.pid
+ExecStart=$TOMCAT_DIR/bin/startup.sh
+ExecStop=$TOMCAT_DIR/bin/shutdown.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable pauladeployer-tomcat
+
 echo ""
 echo "== Everything installed and configured. Rebooting in 5 seconds to apply it all at once =="
 echo "(dialout group membership, the field hotspot, and the factory-network client all need a"
@@ -392,7 +420,10 @@ echo "After it comes back up (30-45s):"
 echo "  - From your phone/laptop: join the '$FIELD_SSID' WiFi network, then ssh <user>@192.168.50.1"
 echo "  - Test: java -jar ~/paulauploader/target/paulauploader.jar sync-pull"
 echo "  - Tomcat $TOMCAT_VERSION is at $TOMCAT_DIR - deploy the field-ops webapp's WAR to"
-echo "    $TOMCAT_DIR/webapps/ once it exists, then $TOMCAT_DIR/bin/startup.sh."
+echo "    $TOMCAT_DIR/webapps/, then either reboot or 'sudo systemctl restart pauladeployer-tomcat'"
+echo "    - it now starts automatically on every boot via the pauladeployer-tomcat systemd service,"
+echo "    no manual startup.sh needed. Use that service (not the raw startup.sh/shutdown.sh scripts)"
+echo "    to stop/start it by hand too, so systemd's own state stays in sync."
 echo "  - To pick up future code changes: cd ~/paulauploader && git pull && mvn package"
 sleep 5
 sudo reboot
