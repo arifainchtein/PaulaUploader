@@ -46,13 +46,26 @@ public class FirmwareFlasher {
 	// calls this with false; the two-device flash()/watch-flash path keeps the old exclude-Wally
 	// behavior via the no-arg overload above.
 	public SerialPort findTargetPort(boolean excludeWallyPort) {
-		SerialPort wally = excludeWallyPort ? PaulaSerialLink.findWallyPort() : null;
+		java.util.List<String> candidateNames = new java.util.ArrayList<>();
 		for (SerialPort port : SerialPort.getCommPorts()) {
 			String name = port.getSystemPortName();
-			if (wally != null && port.getSystemPortName().equals(wally.getSystemPortName())) {
+			if (name.startsWith("ttyUSB") || name.startsWith("ttyACM")) {
+				candidateNames.add(name);
+			}
+		}
+		// Defensive backstop for the exact single-device scenario the comment above already
+		// documents (confirmed again 2026-09-05 on PaulaDeployer, which always called this with
+		// excludeWallyPort=true and had no per-caller override): if there's only one serial
+		// candidate plugged in at all, it can't simultaneously be "the target minus Wally", so
+		// skip the probe regardless of what the caller passed - probing here means opening/
+		// writing to the target itself, which resets it and can corrupt the next command sent.
+		SerialPort wally = (excludeWallyPort && candidateNames.size() > 1) ? PaulaSerialLink.findWallyPort() : null;
+		for (SerialPort port : SerialPort.getCommPorts()) {
+			String name = port.getSystemPortName();
+			if (wally != null && name.equals(wally.getSystemPortName())) {
 				continue;
 			}
-			if (name.startsWith("ttyUSB") || name.startsWith("ttyACM")) {
+			if (candidateNames.contains(name)) {
 				return port;
 			}
 		}

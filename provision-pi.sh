@@ -258,6 +258,18 @@ ifup ${USB_WIFI} || true
 sleep 2
 EOF
 fi
+# Lets PaulaDeployer (or anything else on 8080) be reached at plain http://<hostname>/ - port 80
+# needs root to bind directly, but Tomcat itself never should (confirmed 2026-09-05: running
+# Tomcat as root to get port 80 caused two real bugs - user.home resolving to /root instead of
+# /home/pi, and jSerialComm's native library ending up under /root/.jSerialComm where a later
+# pi-owned process couldn't reuse it). A kernel-level NAT redirect decouples "needs port 80" from
+# "needs to run as root" entirely - Tomcat keeps running as pi on plain 8080, unaware port 80
+# exists at all. -C (check) before -A (add) so re-running this (e.g. every boot via rc.local)
+# doesn't pile up duplicate rules.
+sudo tee -a /etc/rc.local > /dev/null <<'EOF'
+iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080 2>/dev/null || \
+  iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080
+EOF
 echo "exit 0" | sudo tee -a /etc/rc.local > /dev/null
 sudo chmod +x /etc/rc.local
 sudo systemctl enable rc-local 2>/dev/null || true
