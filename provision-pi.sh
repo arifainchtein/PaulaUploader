@@ -35,7 +35,12 @@
 # fail. ifupdown sidesteps both: nothing here is started live (see the reboot note below), and
 # /etc/rc.local (also written below) brings both radios up at the very end of boot with explicit
 # retries, so there's no unit-ordering race to lose. The hotspot is always set up as long as
-# FIELD_SSID resolves to something (it has a default below) - FIELD_PASSWORD is optional: set it
+# FIELD_SSID resolves to something - it defaults to this Pi's own hostname (confirmed 2026-09-06:
+# with two Pis in the field at once, a fixed shared default like the old "paula-pi-field" means
+# both hotspots broadcast the identical SSID, which just confuses a phone trying to tell them
+# apart) - set the hostname before provisioning (raspi-config, or Raspberry Pi Imager's own
+# customization step) so it's already right, or override FIELD_SSID explicitly if you want
+# something other than the hostname. FIELD_PASSWORD is optional: set it
 # for a WPA2-secured hotspot, or leave it blank/unset for an OPEN hotspot (no password - anyone in
 # range can join and get a shell on this Pi, so only do this somewhere that's acceptable).
 # FACTORY_WIFI_PASSWORD is optional the same way - blank/unset joins an open factory network
@@ -66,7 +71,7 @@ NUC_HOST="${NUC_HOST:-192.168.1.138}"
 NUC_USER="${NUC_USER:-ari}"
 NUC_KEY="${NUC_KEY:-$HOME/.ssh/chilhuacle}"
 REPO_URL="${REPO_URL:-git@github.com:arifainchtein/PaulaUploader.git}"
-FIELD_SSID="${FIELD_SSID:-paula-pi-field}"
+FIELD_SSID="${FIELD_SSID:-$(hostname)}"
 FIELD_PASSWORD="${FIELD_PASSWORD:-}"
 FACTORY_WIFI_SSID="${FACTORY_WIFI_SSID:-}"
 FACTORY_WIFI_PASSWORD="${FACTORY_WIFI_PASSWORD:-}"
