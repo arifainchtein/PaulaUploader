@@ -15,6 +15,10 @@
 #
 # Builds on the Pi itself from a git clone (JDK + Maven), rather than building elsewhere and
 # copying a jar over - set REPO_URL below (or export it) to your GitHub repo once it exists.
+# Also clones, builds, and deploys PaulaDeployer (the field-ops phone webapp, a separate GitHub
+# repo - PAULADEPLOYER_REPO_URL below) straight into this Pi's own Tomcat, so it's answering
+# requests as soon as the reboot at the end of this script completes - no separate manual "now go
+# build and scp the webapp" step needed afterward.
 #
 # What this does NOT do: it doesn't touch the factory NUC's own configuration - it only reads a
 # few files off it (over SSH, using the same key/user the factory webapp's own deploy step already
@@ -71,6 +75,7 @@ NUC_HOST="${NUC_HOST:-192.168.1.138}"
 NUC_USER="${NUC_USER:-ari}"
 NUC_KEY="${NUC_KEY:-$HOME/.ssh/chilhuacle}"
 REPO_URL="${REPO_URL:-git@github.com:arifainchtein/PaulaUploader.git}"
+PAULADEPLOYER_REPO_URL="${PAULADEPLOYER_REPO_URL:-git@github.com:arifainchtein/PaulaDeployer.git}"
 FIELD_SSID="${FIELD_SSID:-$(hostname)}"
 FIELD_PASSWORD="${FIELD_PASSWORD:-}"
 FACTORY_WIFI_SSID="${FACTORY_WIFI_SSID:-}"
@@ -315,6 +320,21 @@ create table if not exists deploymentResult(
     flashedon bigint,
     reported boolean default false
 );
+create table if not exists deployAttempt(
+    id serial primary key,
+    manifestfile varchar(200) not null,
+    productid int,
+    productname varchar(100),
+    serialnumber varchar(50),
+    reponame varchar(100),
+    version int,
+    startedon bigint,
+    completedon bigint,
+    status varchar(20) default 'Running',
+    terminallog text,
+    reported boolean default false,
+    productdefinitionid int
+);
 "
 
 echo "== Ensure this Pi has an SSH key trusted by the NUC (needed for the rsync fetch below) =="
@@ -388,6 +408,25 @@ else
   echo "Tomcat already present at $TOMCAT_DIR - leaving it as-is (delete the folder and re-run to reinstall)."
 fi
 
+# Confirmed gotcha (2026-09-04/05): Tomcat's stock webapps/ROOT sample app shadows any ROOT.war
+# dropped in next to it (a directory takes priority over the war of the same name) - remove it
+# once, before this Pi's own ROOT.war ever lands, so PaulaDeployer is what actually answers "/".
+rm -rf "$TOMCAT_DIR/webapps/ROOT"
+
+echo "== Cloning and building PaulaDeployer (the field-operations webapp) from GitHub =="
+# Built here, not copied from a dev machine's scp step - PaulaDeployer's own pom.xml has a
+# maven-antrun-plugin that scp's its WAR to a Paula over SSH using a DEV MACHINE's private key
+# (see its pom.xml's server.address/private.key properties), which doesn't exist on Paula itself
+# and isn't needed here anyway since the build already IS on the target - -Dmaven.antrun.skip=true
+# skips that step, then the built WAR is copied straight into Tomcat's webapps/ locally.
+if [ -d "$HOME/pauladeployer-src/.git" ]; then
+  git -C "$HOME/pauladeployer-src" pull
+else
+  git clone "$PAULADEPLOYER_REPO_URL" "$HOME/pauladeployer-src"
+fi
+mvn -f "$HOME/pauladeployer-src/pom.xml" package -Dmaven.antrun.skip=true
+cp "$HOME/pauladeployer-src/target/ROOT.war" "$TOMCAT_DIR/webapps/ROOT.war"
+
 echo "== Installing a systemd service so Tomcat starts automatically on every boot =="
 # Confirmed gotcha (2026-09-05): without this, Tomcat only ever ran when someone manually SSH'd
 # in and ran startup.sh - fine on a bench, useless in the field where there's no monitor/keyboard
@@ -423,12 +462,15 @@ echo "fresh boot to take effect cleanly - this is the only reboot needed, and it
 echo ""
 echo "After it comes back up (30-45s):"
 echo "  - From your phone/laptop: join the '$FIELD_SSID' WiFi network, then ssh <user>@192.168.50.1"
-echo "  - Test: java -jar ~/paulauploader/target/paulauploader.jar sync-pull"
-echo "  - Tomcat $TOMCAT_VERSION is at $TOMCAT_DIR - deploy the field-ops webapp's WAR to"
-echo "    $TOMCAT_DIR/webapps/, then either reboot or 'sudo systemctl restart pauladeployer-tomcat'"
-echo "    - it now starts automatically on every boot via the pauladeployer-tomcat systemd service,"
-echo "    no manual startup.sh needed. Use that service (not the raw startup.sh/shutdown.sh scripts)"
-echo "    to stop/start it by hand too, so systemd's own state stays in sync."
+echo "  - Test the CLI: java -jar ~/paulauploader/target/paulauploader.jar sync-pull"
+echo "  - PaulaDeployer is already built and deployed - just open http://192.168.50.1/ (or"
+echo "    :8080) in a phone's browser, no manual WAR copy needed. It starts automatically on"
+echo "    every boot via the pauladeployer-tomcat systemd service - use"
+echo "    'sudo systemctl {start|stop|restart|status} pauladeployer-tomcat' to control it by hand"
+echo "    (not the raw startup.sh/shutdown.sh scripts, so systemd's own state stays in sync)."
+echo "  - To pick up future PaulaDeployer code changes: cd ~/pauladeployer-src && git pull &&"
+echo "    mvn package -Dmaven.antrun.skip=true && cp target/ROOT.war $TOMCAT_DIR/webapps/ROOT.war"
+echo "    && sudo systemctl restart pauladeployer-tomcat"
 echo "  - To pick up future code changes: cd ~/paulauploader && git pull && mvn package"
 sleep 5
 sudo reboot
