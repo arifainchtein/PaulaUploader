@@ -289,7 +289,11 @@ sudo usermod -a -G dialout "$USER"
 echo "NOTE: takes effect on next login/reboot, not this shell."
 
 echo "== pyserial for esptool.py (same gotcha the factory NUC itself hit - see project memory) =="
-pip3 install --break-system-packages pyserial || pip3 install pyserial
+# Confirmed gotcha (2026-09-06): even `pip3 install --break-system-packages pyserial` can still
+# hit PEP 668's "externally-managed-environment" error on Trixie. Debian's own packaged pyserial
+# sidesteps the whole pip-vs-system-Python fight entirely - apt is the sanctioned path here, not
+# a pip flag.
+sudo apt-get install -y python3-serial
 
 echo "== Local Postgres for paulauploader =="
 sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='paulauploader'" | grep -q 1 || \
