@@ -11,7 +11,7 @@ Run on the Pi itself, from its local keyboard/monitor (not over SSH - the script
 WiFi and reboots, which can kill a remote session riding on that same connection):
 
 ```bash
-git clone git@github.com:arifainchtein/PaulaUploader.git
+git clone https://github.com/arifainchtein/PaulaUploader.git
 cd PaulaUploader
 chmod +x provision-pi.sh
 ./provision-pi.sh
