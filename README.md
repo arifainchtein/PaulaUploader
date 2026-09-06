@@ -33,6 +33,11 @@ password, WiFi country, console font size, NUC connection details).
 The script reboots itself at the end. After it comes back up (30-45s), join its field hotspot from
 a phone/laptop and `ssh <user>@192.168.50.1`.
 
+This also clones, builds, and deploys **[PaulaDeployer](https://github.com/arifainchtein/PaulaDeployer)**
+(the phone-friendly field webapp) straight into the Pi's own Tomcat - the Pi is fully ready to go
+as soon as it reboots, no separate manual webapp deploy step needed. Just open
+`http://192.168.50.1/` in a phone's browser.
+
 ## Building and running the CLI
 
 ```bash
