@@ -211,9 +211,20 @@ network 192.168.50.0
 broadcast 192.168.50.255
 EOF
 if [ -n "$USB_WIFI" ]; then
+  # Confirmed gotcha (2026-09-08): deliberately NOT "allow-hotplug" here, unlike wlan0/eth0 above.
+  # allow-hotplug makes udev fire its OWN independent "ifup wlan1" the instant the dongle's driver
+  # creates the device - racing against rc.local's own explicit ifdown/ifup sequence for the same
+  # interface below. wlan0's static-IP config comes up near-instantly so this race never shows
+  # there, but wlan1's DHCP+WPA negotiation is slow enough that the two calls collide: whichever
+  # runs second (usually rc.local's) just blocks on ifupdown's own lock file waiting for the first
+  # to finish - confirmed directly, "ifdown: waiting for lock on /run/network/ifstate.wlan1" then
+  # "ifup: waiting for lock" immediately after, even with the timeout wrapper (added earlier the
+  # same investigation) correctly killing each stuck attempt after 20s - the lock was never free
+  # because a SECOND process kept re-acquiring it. A bare "iface" stanza with no allow-hotplug/auto
+  # is never touched by udev at all - only rc.local's explicit calls manage it, so there's only
+  # ever one thing holding the lock at a time.
   sudo tee -a /etc/network/interfaces > /dev/null <<EOF
 
-allow-hotplug ${USB_WIFI}
 iface ${USB_WIFI} inet dhcp
 wpa-conf /etc/wpa_supplicant/wpa_supplicant.conf
 EOF
