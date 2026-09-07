@@ -293,11 +293,19 @@ echo "== Writing /etc/rc.local to bring both radios up at the end of every boot,
 # with explicit retries, THEN restarting hostapd/dnsmasq, THEN cycling the client interface, all
 # at the very end of boot - this is what actually avoids the startup-ordering races that hit
 # systemd-managed equivalents (confirmed 2026-09-04).
+#
+# Confirmed gotcha (2026-09-07, on a third Pi): ifup/ifdown serialize themselves via their own
+# lock file - if one call gets genuinely stuck (not just fails fast) rather than exiting cleanly,
+# it holds that lock forever, and boot hangs at "Waiting for lock on ... and the lock is never
+# released." That defeats the whole retry loop below too - every subsequent attempt just queues up
+# behind the same held lock instead of getting its own fresh try. Every ifup/ifdown call here is
+# wrapped in `timeout` so a stuck one fails after a bounded time instead of hanging forever -
+# `coreutils` (and therefore `timeout`) is a base Debian package, no extra install needed.
 sudo tee /etc/rc.local > /dev/null <<EOF
 #!/bin/sh -e
-ifup ${BUILTIN_WIFI} || true
+timeout 20 ifup ${BUILTIN_WIFI} || true
 sleep 5
-ifup ${BUILTIN_WIFI} || true
+timeout 20 ifup ${BUILTIN_WIFI} || true
 sleep 2
 service hostapd restart
 sleep 3
@@ -310,14 +318,15 @@ if [ -n "$USB_WIFI" ]; then
   # even though this exact line was already present in rc.local. USB device enumeration timing is
   # less predictable than the SDIO-attached built-in radio (which already gets two attempts above)
   # - rc.local running at "the end of boot" doesn't guarantee the dongle's driver has finished
-  # initializing by then. Retries up to 6 times, 5s apart (30s worst case), actually checking
-  # success (&& break) instead of blindly continuing regardless like the old single-shot did.
+  # initializing by then. Retries up to 6 times, 20s apart (2min worst case, bounded by the timeout
+  # above so a stuck attempt can't turn that into "forever"), actually checking success (&& break)
+  # instead of blindly continuing regardless like the old single-shot did.
   sudo tee -a /etc/rc.local > /dev/null <<EOF
-ifdown ${USB_WIFI} || true
+timeout 20 ifdown ${USB_WIFI} || true
 sleep 2
 i=0
 while [ \$i -lt 6 ]; do
-  ifup ${USB_WIFI} && break || true
+  timeout 20 ifup ${USB_WIFI} && break || true
   i=\$((i+1))
   sleep 5
 done
