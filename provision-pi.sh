@@ -121,38 +121,46 @@ echo "== Detecting WiFi interfaces (built-in radio vs USB adapter) =="
 # Identify the built-in radio by its driver (brcmfmac, Broadcom - what every Pi's onboard WiFi
 # uses) instead of by enumeration order; whatever other wifi device shows up (if any) is treated
 # as the USB adapter. Pure sysfs, no NetworkManager/nmcli dependency (disabled above).
-BUILTIN_WIFI=""
-USB_WIFI=""
+#
+# Confirmed gotcha (2026-09-07): kernel enumeration order between the SDIO-attached built-in
+# radio and a USB dongle is NOT guaranteed stable across reboots - confirmed directly on Paula2,
+# a plain reboot with no hardware changes swapped which physical radio got called wlan0 vs
+# wlan1, so hostapd's hardcoded "interface=wlan0" ended up bound to the dongle instead of the
+# built-in radio. BUILTIN_WIFI/USB_WIFI below are therefore FIXED target names (wlan0/wlan1),
+# used for every config file written further down, regardless of whatever the kernel happened to
+# enumerate this boot - CURRENT_BUILTIN_DEV (below) is only used to tell udev what to rename.
+# Teleonome's actual CreateTeleonome.sh (after calling network_with_internal_mode.sh) does the
+# same thing: pins the built-in radio to a fixed name via a udev rule keyed on its driver - that
+# step just hadn't been ported over here until now. Renaming only takes effect on next boot, but
+# since every file below already targets the fixed wlan0/wlan1 names, this converges to fully
+# correct in the one reboot this script already does at the end - no second run needed.
+CURRENT_BUILTIN_DEV=""
+DONGLE_PRESENT=false
 for dev in $(ls /sys/class/net); do
   [ -d "/sys/class/net/$dev/wireless" ] || continue
   driver=$(basename "$(readlink -f "/sys/class/net/$dev/device/driver" 2>/dev/null)" 2>/dev/null || true)
-  if [ "$driver" = "brcmfmac" ] && [ -z "$BUILTIN_WIFI" ]; then
-    BUILTIN_WIFI="$dev"
-  elif [ "$dev" != "$BUILTIN_WIFI" ] && [ -z "$USB_WIFI" ]; then
-    USB_WIFI="$dev"
+  if [ "$driver" = "brcmfmac" ] && [ -z "$CURRENT_BUILTIN_DEV" ]; then
+    CURRENT_BUILTIN_DEV="$dev"
+  elif [ "$dev" != "$CURRENT_BUILTIN_DEV" ]; then
+    DONGLE_PRESENT=true
   fi
 done
-if [ -z "$BUILTIN_WIFI" ]; then
-  echo "Could not identify a brcmfmac (built-in) WiFi radio - falling back to wlan0 for the hotspot."
-  BUILTIN_WIFI="wlan0"
+BUILTIN_WIFI="wlan0"
+USB_WIFI=""
+if [ "$DONGLE_PRESENT" = true ]; then
+  USB_WIFI="wlan1"
 fi
-echo "Built-in radio (hotspot): $BUILTIN_WIFI"
+if [ -z "$CURRENT_BUILTIN_DEV" ]; then
+  echo "Could not identify a brcmfmac (built-in) WiFi radio - proceeding with wlan0 as the hotspot name anyway."
+fi
+echo "Built-in radio (hotspot): $BUILTIN_WIFI (currently enumerated as ${CURRENT_BUILTIN_DEV:-unknown})"
 echo "USB adapter (factory network): ${USB_WIFI:-none detected - plug it in and re-run if you want FactoryNet set up now}"
 
-# Confirmed gotcha (2026-09-07): the comment this replaced claimed "no renaming, no MAC pinning -
-# ported as-is from the proven Teleonome pattern, which does the same" - that was wrong. Kernel
-# enumeration order between the SDIO-attached built-in radio and a USB dongle is NOT guaranteed
-# stable across reboots (confirmed directly on Paula2: a plain reboot, no hardware changes, swapped
-# which physical radio was wlan0 vs wlan1 - hostapd's hardcoded "interface=wlan0" then bound the AP
-# to the dongle instead of the built-in radio). Teleonome's ACTUAL pattern (CreateTeleonome.sh,
-# after calling network_with_internal_mode.sh) DOES pin the built-in radio's name via a udev rule
-# keyed on its driver (brcmfmac) - that step just never got ported over here. Doing that now: pins
-# brcmfmac to whatever name it has THIS run (so every file written below using $BUILTIN_WIFI stays
-# correct), and the USB dongle - having no matching rule - simply falls into whatever name is left,
-# same as it already does today, just now durably so instead of racily so.
-sudo tee /etc/udev/rules.d/72-static-names.rules > /dev/null <<EOF
+if [ -n "$CURRENT_BUILTIN_DEV" ]; then
+  sudo tee /etc/udev/rules.d/72-static-names.rules > /dev/null <<EOF
 ACTION=="add", SUBSYSTEM=="net", DRIVERS=="brcmfmac", NAME="${BUILTIN_WIFI}"
 EOF
+fi
 
 echo "== Writing field-WiFi config: hostapd+dnsmasq AP on $BUILTIN_WIFI, wpa_supplicant client on ${USB_WIFI:-<none>} =="
 # Classic ifupdown/hostapd/dnsmasq/wpa_supplicant stack, ported from
