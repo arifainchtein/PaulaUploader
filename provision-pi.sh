@@ -119,6 +119,16 @@ echo "== Disabling NetworkManager - using the classic ifupdown/wpa_supplicant/ho
 sudo systemctl disable --now NetworkManager 2>/dev/null || true
 sudo systemctl mask NetworkManager 2>/dev/null || true
 
+# Confirmed gotcha (2026-09-08): NetworkManager's own normal job includes auto-clearing rfkill
+# soft-blocks for wireless devices it manages - with it disabled (above), nothing does that
+# anymore. A USB WiFi dongle can come up soft-blocked by default (or the kernel can apply one
+# itself for a radio with no established regulatory domain yet), and ifup then fails with
+# "RTNETLINK answers: Operation not possible due to RF-kill" / "Network is down" on every DHCP
+# attempt - confirmed directly on a from-scratch Paula reinstall, wlan0 was unaffected (came up
+# fine) but wlan1 was rfkill-blocked. Unblocking here, and again in rc.local (below) on every boot,
+# since this can plausibly reappear on a fresh hotplug rather than being a one-time state.
+sudo rfkill unblock all 2>/dev/null || true
+
 echo "== Ensure SSH is enabled =="
 sudo systemctl enable ssh
 # Tolerate a leftover sshd already bound to :22 from an earlier boot/session (confirmed
@@ -314,6 +324,7 @@ echo "== Writing /etc/rc.local to bring both radios up at the end of every boot,
 # `coreutils` (and therefore `timeout`) is a base Debian package, no extra install needed.
 sudo tee /etc/rc.local > /dev/null <<EOF
 #!/bin/sh -e
+rfkill unblock all || true
 timeout 20 ifup ${BUILTIN_WIFI} || true
 sleep 5
 timeout 20 ifup ${BUILTIN_WIFI} || true
