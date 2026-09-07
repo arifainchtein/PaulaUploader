@@ -23,7 +23,10 @@
 # What this does NOT do: it doesn't touch the factory NUC's own configuration - it only reads a
 # few files off it (over SSH, using the same key/user the factory webapp's own deploy step already
 # uses, see pom.xml) to get an esptool/bootloader toolchain that's byte-identical to what the NUC
-# uses today, rather than risking a version-mismatched one via a fresh arduino-cli install.
+# uses today, rather than risking a version-mismatched one via a fresh arduino-cli install. This
+# fetch happens LAST (confirmed 2026-09-08) and is non-fatal if the NUC isn't reachable - Postgres,
+# the CLI, Tomcat, and PaulaDeployer are already fully installed by that point regardless, so an
+# unreachable NUC only means "flashing won't work yet", not "provisioning failed".
 #
 # Field WiFi (optional but recommended - lets you SSH in from a phone in the field with no other
 # network available): the Pi's built-in radio hosts its own AP, a USB WiFi adapter joins the
@@ -444,41 +447,13 @@ create table if not exists deployAttempt(
 );
 "
 
-echo "== Ensure this Pi has an SSH key trusted by the NUC (needed for the rsync fetch below) =="
-if [ ! -f "$NUC_KEY" ]; then
-  echo "No key at $NUC_KEY yet - generating one now."
-  ssh-keygen -t ed25519 -f "$NUC_KEY" -N ""
-fi
-# If this key was copied in manually (e.g. reusing an existing key from another machine) rather
-# than generated fresh above, its permissions often don't survive the copy - ssh silently refuses
-# a group/world-readable private key rather than erroring clearly, which looks identical to "not
-# trusted yet" from the check below. Fix it unconditionally rather than trying to detect it.
-chmod 600 "$NUC_KEY"
-if ! ssh -o BatchMode=yes -o ConnectTimeout=5 -i "$NUC_KEY" "${NUC_USER}@${NUC_HOST}" true 2>/dev/null; then
-  echo "This Pi's key isn't installed on the NUC yet (or the NUC isn't reachable right now)."
-  echo "If the NUC is reachable, run this once, then re-run this script:"
-  echo "  ssh-copy-id -i ${NUC_KEY}.pub ${NUC_USER}@${NUC_HOST}"
-  echo "(it'll ask for ${NUC_USER}'s NUC password once, then never again)"
-  exit 1
-fi
-
-echo "== Fetching esptool + bootloader files from the NUC (matches FirmwareFlasher's hardcoded paths) =="
-mkdir -p "$HOME/.arduino15/packages/esp32/tools/esptool_py/3.0.0"
-mkdir -p "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions"
-mkdir -p "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin"
-
-rsync -av -e "ssh -i $NUC_KEY" \
-  "${NUC_USER}@${NUC_HOST}:.arduino15/packages/esp32/tools/esptool_py/3.0.0/" \
-  "$HOME/.arduino15/packages/esp32/tools/esptool_py/3.0.0/"
-
-rsync -av -e "ssh -i $NUC_KEY" \
-  "${NUC_USER}@${NUC_HOST}:.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions/boot_app0.bin" \
-  "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions/boot_app0.bin"
-
-rsync -av -e "ssh -i $NUC_KEY" \
-  "${NUC_USER}@${NUC_HOST}:.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin/bootloader_dio_80m.bin" \
-  "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin/bootloader_dio_80m.bin"
-
+# Audit pass (2026-09-08): the NUC-key check + esptool/bootloader fetch used to sit HERE, before
+# PaulaUploader/Tomcat/PaulaDeployer install, and hard-exited the whole script if the NUC wasn't
+# reachable - meaning a Pi provisioned without NUC access never got Tomcat or PaulaDeployer
+# installed at all, even though neither actually depends on the NUC. In practice a Paula is always
+# provisioned on the factory network (NUC reachable), so this hasn't actually bitten - moved as a
+# robustness improvement regardless, plus the NUC check no longer hard-exits (see below), so even
+# an unexpected NUC outage during provisioning still leaves a fully working Tomcat/PaulaDeployer.
 echo "== Cloning and building paulauploader from GitHub =="
 if [ -d "$HOME/paulauploader/.git" ]; then
   git -C "$HOME/paulauploader" pull
@@ -575,6 +550,51 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable pauladeployer-tomcat
 
+echo "== Checking whether the NUC is reachable (needed for the esptool/bootloader fetch below) =="
+# No longer hard-exits if the NUC isn't reachable (confirmed 2026-09-08) - everything above this
+# point (Postgres, the CLI, Tomcat, PaulaDeployer) is already fully installed and working
+# regardless, so an unreachable NUC should only mean "flashing won't work yet", not "provisioning
+# failed". In practice a Paula is always provisioned on the factory network, so this is a
+# robustness improvement for an unexpected outage rather than something expected to trigger often.
+NUC_REACHABLE=true
+if [ ! -f "$NUC_KEY" ]; then
+  echo "No key at $NUC_KEY yet - generating one now."
+  ssh-keygen -t ed25519 -f "$NUC_KEY" -N ""
+fi
+# If this key was copied in manually (e.g. reusing an existing key from another machine) rather
+# than generated fresh above, its permissions often don't survive the copy - ssh silently refuses
+# a group/world-readable private key rather than erroring clearly, which looks identical to "not
+# trusted yet" from the check below. Fix it unconditionally rather than trying to detect it.
+chmod 600 "$NUC_KEY"
+if ! ssh -o BatchMode=yes -o ConnectTimeout=5 -i "$NUC_KEY" "${NUC_USER}@${NUC_HOST}" true 2>/dev/null; then
+  NUC_REACHABLE=false
+  echo "This Pi's key isn't installed on the NUC yet (or the NUC isn't reachable right now)."
+  echo "Everything else (Postgres, the CLI, Tomcat, PaulaDeployer) is already installed and"
+  echo "working - only the esptool/bootloader toolchain (needed for an actual flash) is being"
+  echo "skipped. Once the NUC is reachable, run this once, then re-run this script to pick it up:"
+  echo "  ssh-copy-id -i ${NUC_KEY}.pub ${NUC_USER}@${NUC_HOST}"
+  echo "(it'll ask for ${NUC_USER}'s NUC password once, then never again)"
+fi
+
+if [ "$NUC_REACHABLE" = true ]; then
+  echo "== Fetching esptool + bootloader files from the NUC (matches FirmwareFlasher's hardcoded paths) =="
+  mkdir -p "$HOME/.arduino15/packages/esp32/tools/esptool_py/3.0.0"
+  mkdir -p "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions"
+  mkdir -p "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin"
+
+  rsync -av -e "ssh -i $NUC_KEY" \
+    "${NUC_USER}@${NUC_HOST}:.arduino15/packages/esp32/tools/esptool_py/3.0.0/" \
+    "$HOME/.arduino15/packages/esp32/tools/esptool_py/3.0.0/"
+
+  rsync -av -e "ssh -i $NUC_KEY" \
+    "${NUC_USER}@${NUC_HOST}:.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions/boot_app0.bin" \
+    "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions/boot_app0.bin"
+
+  rsync -av -e "ssh -i $NUC_KEY" \
+    "${NUC_USER}@${NUC_HOST}:.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin/bootloader_dio_80m.bin" \
+    "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin/bootloader_dio_80m.bin"
+fi
+
 echo ""
 echo "== Everything installed and configured. Rebooting in 5 seconds to apply it all at once =="
 echo "(dialout group membership, the field hotspot, and the factory-network client all need a"
@@ -592,5 +612,11 @@ echo "  - To pick up future PaulaDeployer code changes: cd ~/pauladeployer-src &
 echo "    mvn package -Dmaven.antrun.skip=true && cp target/ROOT.war $TOMCAT_DIR/webapps/ROOT.war"
 echo "    && sudo systemctl restart pauladeployer-tomcat"
 echo "  - To pick up future code changes: cd ~/paulauploader && git pull && mvn package"
+if [ "$NUC_REACHABLE" != true ]; then
+  echo ""
+  echo "  - NOTE: the esptool/bootloader toolchain was NOT fetched (no NUC access during this run)"
+  echo "    - Inspect/Send Command/an actual flash attempt will fail until you trust this Pi's key"
+  echo "    on the NUC (see above) and re-run this script once it's reachable."
+fi
 sleep 5
 sudo reboot
