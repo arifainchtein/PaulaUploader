@@ -51,10 +51,13 @@
 # instead of a secured one. e.g.:
 #   FIELD_PASSWORD='something-real' FACTORY_WIFI_SSID='OfficeWifi' FACTORY_WIFI_PASSWORD='...' ./provision-pi.sh
 #   FACTORY_WIFI_SSID='OfficeWifi' ./provision-pi.sh   # open hotspot, open factory network
-# The built-in radio is identified by its driver (brcmfmac) each run and whatever literal kernel
-# name it currently has (wlan0, wlan1, ...) is written directly into the config files - same as
-# the proven Teleonome pattern this is ported from. If you add/remove the USB adapter later and
-# reboot, re-run this script so it re-detects and rewrites the config with the current names.
+# The built-in radio is identified by its driver (brcmfmac) each run, then permanently pinned to
+# the fixed name wlan0 via a udev rule (with the USB adapter, if any, always wlan1) - config files
+# always target these two fixed names, regardless of whatever the kernel happened to enumerate
+# this particular boot (confirmed 2026-09-07: without the udev pin, a plain reboot with no
+# hardware changes could swap which physical radio the kernel called wlan0 vs wlan1, silently
+# binding the hotspot to the wrong one). If you add/remove the USB adapter later, re-run this
+# script so it re-detects whether one is present at all.
 # WIFI_COUNTRY (default AU) sets both radios' regulatory domain - required for the built-in radio
 # to transmit at all; override if provisioning outside Australia.
 #
@@ -82,6 +85,13 @@ FACTORY_WIFI_SSID="${FACTORY_WIFI_SSID:-}"
 FACTORY_WIFI_PASSWORD="${FACTORY_WIFI_PASSWORD:-}"
 WIFI_COUNTRY="${WIFI_COUNTRY:-AU}"
 CONSOLE_FONTSIZE="${CONSOLE_FONTSIZE:-16x32}"
+
+# Confirmed gotcha (2026-09-07): running an out-of-date checkout of this script (e.g. forgetting
+# to `git pull` before re-running) after a bug fix landed here produced confusing, hard-to-diagnose
+# symptoms that looked like a fresh bug instead of a stale-version problem. Printing the actual
+# commit this checkout is at, every run, makes that immediately obvious instead of needing a
+# separate `git log` check.
+echo "== provision-pi.sh running from commit: $(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --short HEAD 2>/dev/null || echo 'unknown - not a git checkout') =="
 
 # Done first, before anything else, so the rest of this script's own output benefits too - the
 # default console font on a Lite install (no desktop) is tiny on most monitors/TVs. Applied via
