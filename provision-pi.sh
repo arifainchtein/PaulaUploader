@@ -127,6 +127,21 @@ sudo systemctl enable ssh
 # treating that as fatal.
 sudo systemctl start ssh || echo "   (ssh.service didn't (re)start - sshd is very likely already listening on :22 from earlier; harmless, continuing)"
 
+echo "== Ensure passwordless sudo for $USER =="
+# Confirmed gotcha (2026-09-05, again 2026-09-07): this has never actually been guaranteed by
+# this script - only assumed, because stock Raspberry Pi OS images usually grant it to the
+# initial user automatically. "Usually" isn't "always": one Paula was missing it entirely
+# (forced §14.2's Postgres role-creation step to need an interactive terminal), and PaulaDeployer's
+# web-triggered Shutdown button silently failed on another - sudo has no TTY to prompt on when
+# invoked from a servlet, so without NOPASSWD it just fails immediately and PaulaDeployer had no
+# way to notice or report that. `sudo -n true` isn't a reliable way to check this first - it also
+# succeeds off a live interactive session's cached credential timestamp, not just real NOPASSWD,
+# which would give a false "already fine" here and leave it silently broken again once that
+# timestamp expires. Just always (re)write the file instead - safe to run every time, whether or
+# not it was already there.
+echo "$USER ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/010_${USER}-nopasswd" > /dev/null
+sudo chmod 440 "/etc/sudoers.d/010_${USER}-nopasswd"
+
 echo "== Detecting WiFi interfaces (built-in radio vs USB adapter) =="
 # Identify the built-in radio by its driver (brcmfmac, Broadcom - what every Pi's onboard WiFi
 # uses) instead of by enumeration order; whatever other wifi device shows up (if any) is treated
