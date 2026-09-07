@@ -427,7 +427,15 @@ echo "== Installing Tomcat for PaulaDeployer (the field-operations webapp, ~/Dat
 # whatever Trixie's own package happens to ship.
 TOMCAT_VERSION="8.5.100"
 TOMCAT_DIR="$HOME/pauladeployer/tomcat"
-if [ ! -d "$TOMCAT_DIR" ]; then
+# Confirmed gotcha (2026-09-07): checking just "does $TOMCAT_DIR exist" isn't enough - an earlier
+# interrupted run (network hiccup mid-download, disk space, or the script aborting at some later
+# step) can leave an empty/partial directory behind from mkdir -p having already run before the
+# actual extraction finished. Every run after that then saw the directory "already present" and
+# skipped reinstalling forever, silently leaving Tomcat never actually installed. Check for a real
+# marker file (bin/catalina.sh, only present after a genuinely complete extraction) instead, and
+# wipe out and redo any incomplete leftover rather than trusting it.
+if [ ! -x "$TOMCAT_DIR/bin/catalina.sh" ]; then
+  rm -rf "$TOMCAT_DIR"
   TOMCAT_TARBALL="/tmp/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
   curl -fsSL -o "$TOMCAT_TARBALL" \
     "https://archive.apache.org/dist/tomcat/tomcat-8/v${TOMCAT_VERSION}/bin/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
@@ -435,10 +443,15 @@ if [ ! -d "$TOMCAT_DIR" ]; then
   tar -xzf "$TOMCAT_TARBALL" -C "$TOMCAT_DIR" --strip-components=1
   rm -f "$TOMCAT_TARBALL"
   chmod +x "$TOMCAT_DIR"/bin/*.sh
+  if [ ! -x "$TOMCAT_DIR/bin/catalina.sh" ]; then
+    echo "ERROR: Tomcat extraction did not produce $TOMCAT_DIR/bin/catalina.sh - download or"
+    echo "extraction failed. Check disk space (df -h) and network, then re-run."
+    exit 1
+  fi
   echo "Tomcat $TOMCAT_VERSION extracted to $TOMCAT_DIR - deploy a WAR to $TOMCAT_DIR/webapps/,"
   echo "start with $TOMCAT_DIR/bin/startup.sh, stop with $TOMCAT_DIR/bin/shutdown.sh."
 else
-  echo "Tomcat already present at $TOMCAT_DIR - leaving it as-is (delete the folder and re-run to reinstall)."
+  echo "Tomcat already present and looks valid at $TOMCAT_DIR - leaving it as-is (delete the folder and re-run to reinstall)."
 fi
 
 # Confirmed gotcha (2026-09-04/05): Tomcat's stock webapps/ROOT sample app shadows any ROOT.war
