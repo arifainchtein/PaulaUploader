@@ -138,10 +138,21 @@ if [ -z "$BUILTIN_WIFI" ]; then
 fi
 echo "Built-in radio (hotspot): $BUILTIN_WIFI"
 echo "USB adapter (factory network): ${USB_WIFI:-none detected - plug it in and re-run if you want FactoryNet set up now}"
-# These are the CURRENT boot's kernel names, used directly below (no renaming, no MAC pinning) -
-# ported as-is from the proven Teleonome pattern, which does the same. If you add/remove the USB
-# adapter later, re-run this script so it re-detects and rewrites these files with the current
-# names, same as you would on a Teleonome.
+
+# Confirmed gotcha (2026-09-07): the comment this replaced claimed "no renaming, no MAC pinning -
+# ported as-is from the proven Teleonome pattern, which does the same" - that was wrong. Kernel
+# enumeration order between the SDIO-attached built-in radio and a USB dongle is NOT guaranteed
+# stable across reboots (confirmed directly on Paula2: a plain reboot, no hardware changes, swapped
+# which physical radio was wlan0 vs wlan1 - hostapd's hardcoded "interface=wlan0" then bound the AP
+# to the dongle instead of the built-in radio). Teleonome's ACTUAL pattern (CreateTeleonome.sh,
+# after calling network_with_internal_mode.sh) DOES pin the built-in radio's name via a udev rule
+# keyed on its driver (brcmfmac) - that step just never got ported over here. Doing that now: pins
+# brcmfmac to whatever name it has THIS run (so every file written below using $BUILTIN_WIFI stays
+# correct), and the USB dongle - having no matching rule - simply falls into whatever name is left,
+# same as it already does today, just now durably so instead of racily so.
+sudo tee /etc/udev/rules.d/72-static-names.rules > /dev/null <<EOF
+ACTION=="add", SUBSYSTEM=="net", DRIVERS=="brcmfmac", NAME="${BUILTIN_WIFI}"
+EOF
 
 echo "== Writing field-WiFi config: hostapd+dnsmasq AP on $BUILTIN_WIFI, wpa_supplicant client on ${USB_WIFI:-<none>} =="
 # Classic ifupdown/hostapd/dnsmasq/wpa_supplicant stack, ported from
