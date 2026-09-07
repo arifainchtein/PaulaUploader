@@ -104,10 +104,10 @@ else
 fi
 sudo setupcon --force 2>/dev/null || echo "   (setupcon not available yet - will take effect after first boot's console-setup runs)"
 
-echo "== Installing JDK, Maven, PostgreSQL, Python, git, ifupdown, hostapd, dnsmasq, curl =="
+echo "== Installing JDK, Maven, PostgreSQL, Python, git, ifupdown, hostapd, dnsmasq, iptables, curl =="
 sudo apt-get update
 sudo apt-get install -y default-jdk maven postgresql python3 python3-pip python-is-python3 rsync git curl \
-  ifupdown isc-dhcp-client wpasupplicant hostapd dnsmasq
+  ifupdown isc-dhcp-client wpasupplicant hostapd dnsmasq iptables
 
 echo "== Disabling NetworkManager - using the classic ifupdown/wpa_supplicant/hostapd stack instead =="
 # Ported directly from ~/Data/Teleonome/digitalgeppettowebapp's CreateTeleonome.sh /
@@ -316,9 +316,20 @@ fi
 # "needs to run as root" entirely - Tomcat keeps running as pi on plain 8080, unaware port 80
 # exists at all. -C (check) before -A (add) so re-running this (e.g. every boot via rc.local)
 # doesn't pile up duplicate rules.
+#
+# Confirmed gotcha (2026-09-07): iptables was never actually apt-installed by this script (only
+# ever mentioned in written manual instructions) - on a fresh Trixie image the binary genuinely
+# doesn't exist, so this line failed with "iptables: not found" under rc.local's `set -e`, which
+# made the WHOLE script exit nonzero. rc-local.service then failed, and systemd's default
+# KillMode killed every process still running in its cgroup - including the wpa_supplicant
+# process the WiFi retry loop above had JUST successfully started for wlan1, which is why wlan1
+# came up (confirmed in dmesg - a real DHCP lease) and then got torn back down seconds later. Now
+# apt-installed for real above, but ALSO guarded with `|| true` here as a second line of defense -
+# nothing after the WiFi bring-up in this script should ever be able to kill it again, no matter
+# what future edge case shows up here.
 sudo tee -a /etc/rc.local > /dev/null <<'EOF'
-iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080 2>/dev/null || \
-  iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080
+{ iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080 2>/dev/null || \
+  iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080; } || true
 EOF
 echo "exit 0" | sudo tee -a /etc/rc.local > /dev/null
 sudo chmod +x /etc/rc.local
