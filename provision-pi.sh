@@ -322,6 +322,12 @@ echo "== Writing /etc/rc.local to bring both radios up at the end of every boot,
 # behind the same held lock instead of getting its own fresh try. Every ifup/ifdown call here is
 # wrapped in `timeout` so a stuck one fails after a bounded time instead of hanging forever -
 # `coreutils` (and therefore `timeout`) is a base Debian package, no extra install needed.
+#
+# Audit pass (2026-09-08): `service hostapd/dnsmasq restart` below were the only two commands in
+# this whole file NOT guarded with `|| true`, found by re-reading the script end to end after the
+# iptables incident below (same failure class: any command here that isn't guarded can, under
+# rc.local's own `set -e`, kill the rest of THIS script - including the wlan1 retry loop and the
+# port-80 redirect that come after it - the instant it fails once, for any reason). Guarded now too.
 sudo tee /etc/rc.local > /dev/null <<EOF
 #!/bin/sh -e
 rfkill unblock all || true
@@ -329,9 +335,9 @@ timeout 20 ifup ${BUILTIN_WIFI} || true
 sleep 5
 timeout 20 ifup ${BUILTIN_WIFI} || true
 sleep 2
-service hostapd restart
+service hostapd restart || true
 sleep 3
-service dnsmasq restart
+service dnsmasq restart || true
 sleep 2
 EOF
 if [ -n "$USB_WIFI" ]; then
