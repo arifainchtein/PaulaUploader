@@ -290,11 +290,22 @@ service dnsmasq restart
 sleep 2
 EOF
 if [ -n "$USB_WIFI" ]; then
+  # Confirmed gotcha (2026-09-07): a single ifup attempt (silently swallowed by || true) wasn't
+  # enough for the USB dongle - it needed manual "sudo ifup wlan1" after boot to actually come up,
+  # even though this exact line was already present in rc.local. USB device enumeration timing is
+  # less predictable than the SDIO-attached built-in radio (which already gets two attempts above)
+  # - rc.local running at "the end of boot" doesn't guarantee the dongle's driver has finished
+  # initializing by then. Retries up to 6 times, 5s apart (30s worst case), actually checking
+  # success (&& break) instead of blindly continuing regardless like the old single-shot did.
   sudo tee -a /etc/rc.local > /dev/null <<EOF
 ifdown ${USB_WIFI} || true
 sleep 2
-ifup ${USB_WIFI} || true
-sleep 2
+i=0
+while [ \$i -lt 6 ]; do
+  ifup ${USB_WIFI} && break || true
+  i=\$((i+1))
+  sleep 5
+done
 EOF
 fi
 # Lets PaulaDeployer (or anything else on 8080) be reached at plain http://<hostname>/ - port 80
