@@ -56,8 +56,12 @@
 # something other than the hostname. FIELD_PASSWORD is optional: set it
 # for a WPA2-secured hotspot, or leave it blank/unset for an OPEN hotspot (no password - anyone in
 # range can join and get a shell on this Pi, so only do this somewhere that's acceptable).
-# FACTORY_WIFI_PASSWORD is optional the same way - blank/unset joins an open factory network
-# instead of a secured one. e.g.:
+# FACTORY_WIFI_SSID defaults to whatever network you're CURRENTLY connected to when you run this
+# (via nmcli, since NetworkManager is still active at this point - see the WiFi-reconfiguration
+# section far below) - i.e. usually just works with no override needed, since you'd normally have
+# already joined the office/factory WiFi via raspi-config right before running this. Override it
+# explicitly if you want the dongle to join a DIFFERENT network than whatever it's on right now, or
+# if that network is secured (FACTORY_WIFI_PASSWORD is never auto-detected, only the SSID is). e.g.:
 #   FIELD_PASSWORD='something-real' FACTORY_WIFI_SSID='OfficeWifi' FACTORY_WIFI_PASSWORD='...' ./provision-pi.sh
 #   FACTORY_WIFI_SSID='OfficeWifi' ./provision-pi.sh   # open hotspot, open factory network
 # The built-in radio is identified by its driver (brcmfmac) each run, then permanently pinned to
@@ -90,7 +94,17 @@ REPO_URL="${REPO_URL:-https://github.com/arifainchtein/PaulaUploader.git}"
 PAULADEPLOYER_REPO_URL="${PAULADEPLOYER_REPO_URL:-https://github.com/arifainchtein/PaulaDeployer.git}"
 FIELD_SSID="${FIELD_SSID:-$(hostname)}"
 FIELD_PASSWORD="${FIELD_PASSWORD:-}"
-FACTORY_WIFI_SSID="${FACTORY_WIFI_SSID:-}"
+# Confirmed gotcha (2026-09-08): forgetting to pass FACTORY_WIFI_SSID meant wpa_supplicant.conf
+# never got written at all, silently leaving wlan1 with no network to join - an easy, invisible
+# mistake to make since nothing errors, it just quietly skips that step. Auto-detected instead:
+# NetworkManager is still active and managing the current connection at this point in the script
+# (it isn't disabled until the very end - see the WiFi-reconfiguration section far below), so
+# whatever network raspi-config's own Wireless LAN step just joined is exactly what nmcli reports
+# as active right now. Falls back to empty (same as before, meaning "skip factory-network setup")
+# if nmcli isn't available or nothing's currently connected - explicit FACTORY_WIFI_SSID still
+# overrides this when set, e.g. if you want the dongle to join a DIFFERENT network than whatever
+# the built-in radio happens to be on right now.
+FACTORY_WIFI_SSID="${FACTORY_WIFI_SSID:-$(nmcli -t -f active,ssid dev wifi 2>/dev/null | grep '^yes:' | head -1 | cut -d: -f2 || true)}"
 FACTORY_WIFI_PASSWORD="${FACTORY_WIFI_PASSWORD:-}"
 WIFI_COUNTRY="${WIFI_COUNTRY:-AU}"
 CONSOLE_FONTSIZE="${CONSOLE_FONTSIZE:-16x32}"
