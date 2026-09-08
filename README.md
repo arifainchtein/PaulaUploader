@@ -7,8 +7,15 @@ pushes results back once reconnected.
 
 ## Provisioning a fresh Pi
 
-Run on the Pi itself, from its local keyboard/monitor (not over SSH - the script reconfigures
-WiFi and reboots, which can kill a remote session riding on that same connection):
+Run on the Pi itself, from its local keyboard/monitor - not over SSH, and not run remotely by
+Claude either. The script reconfigures the network and reboots at the end; over SSH that can drop
+the very connection you're using, and there's no way to recover the Pi remotely if that happens
+mid-run.
+
+First, set the hostname (`raspi-config` -> System Options -> Hostname, e.g. `paula2` - the field
+hotspot's SSID defaults to it, so each Pi in the field is easy to tell apart) and join the
+office/factory WiFi (`raspi-config` -> System Options -> Wireless LAN) for internet access during
+setup. Then:
 
 ```bash
 git clone https://github.com/arifainchtein/PaulaUploader.git
@@ -17,11 +24,10 @@ chmod +x provision-pi.sh
 ./provision-pi.sh
 ```
 
-Set the Pi's hostname before running it (`raspi-config`, or Raspberry Pi Imager's own
-customization step) - the field hotspot's SSID defaults to it, so each Pi in the field is easy to
-tell apart (e.g. hostname `paula2` -> hotspot `paula2`).
-
-To also join a factory/office WiFi network for `sync-pull`/`sync-push` (optional but recommended):
+The factory-network WiFi a USB dongle joins for `sync-pull`/`sync-push` defaults to whatever
+network you just joined above (auto-detected via `nmcli` while it's still active) - no need to
+type the SSID again. Only override it if you want the dongle on a *different* network than the
+one you're currently on, or if it's secured (the password is never auto-detected):
 
 ```bash
 FACTORY_WIFI_SSID='OfficeWifi' FACTORY_WIFI_PASSWORD='...' ./provision-pi.sh
