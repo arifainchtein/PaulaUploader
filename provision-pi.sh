@@ -5,11 +5,17 @@
 #   chmod +x provision-pi.sh
 #   ./provision-pi.sh
 #
-# IMPORTANT: run this from the Pi's own local keyboard/monitor if you can, not over SSH from
-# another machine. This script disables NetworkManager partway through and reboots at the end -
-# both can drop a remote SSH session riding on the WiFi connection being reconfigured, which kills
-# this still-foreground script along with it before it finishes (confirmed in practice). If SSH is
-# your only option, background it instead so a dropped connection can't take the script down:
+# IMPORTANT: this script disables NetworkManager and reboots right at the very end (reordered
+# 2026-09-08 specifically so this is true - see the confirmed-gotcha note further down for why).
+# ALL network-dependent work - apt installs, both git clone+builds, the Tomcat download, the NUC
+# esptool fetch - now happens FIRST, while whatever connection you're currently on is still up,
+# and only the actual WiFi reconfiguration happens last, immediately before the reboot. If you're
+# SSH'd in over a connection NetworkManager itself manages (e.g. the Pi's own wlan0, fresh off an
+# image), that disable step will still drop your session right at the very end, same risk as
+# before - but by then everything has already been built/installed/downloaded, so losing the
+# session there costs nothing except not getting to watch the final reboot happen live. Still
+# safest to background it if SSH is your only option, so a dropped connection can't take the whole
+# script down with it if something upstream of that point takes a while:
 #   nohup ./provision-pi.sh > provision.log 2>&1 &
 #   disown
 #
@@ -24,9 +30,9 @@
 # few files off it (over SSH, using the same key/user the factory webapp's own deploy step already
 # uses, see pom.xml) to get an esptool/bootloader toolchain that's byte-identical to what the NUC
 # uses today, rather than risking a version-mismatched one via a fresh arduino-cli install. This
-# fetch happens LAST (confirmed 2026-09-08) and is non-fatal if the NUC isn't reachable - Postgres,
-# the CLI, Tomcat, and PaulaDeployer are already fully installed by that point regardless, so an
-# unreachable NUC only means "flashing won't work yet", not "provisioning failed".
+# fetch is non-fatal if the NUC isn't reachable - Postgres, the CLI, Tomcat, and PaulaDeployer are
+# already fully installed by that point regardless, so an unreachable NUC only means "flashing
+# won't work yet", not "provisioning failed".
 #
 # Field WiFi (optional but recommended - lets you SSH in from a phone in the field with no other
 # network available): the Pi's built-in radio hosts its own AP, a USB WiFi adapter joins the
@@ -71,9 +77,9 @@
 #
 # This script writes every config file and enables every service it needs, then reboots on its
 # own at the very end - nothing WiFi-related is started live, on purpose (see the note above), so
-# there's no live network transition to babysit over SSH. After it reboots (30-45s, /etc/rc.local
-# needs its own retry-sleeps to finish), join the FIELD_SSID network and: ssh <user>@192.168.50.1
-# - then test with java -jar ~/paulauploader/target/paulauploader.jar sync-pull
+# there's no live network transition to babysit over SSH except at that very last step. After it
+# reboots (30-45s, /etc/rc.local needs its own retry-sleeps to finish), join the FIELD_SSID network
+# and: ssh <user>@192.168.50.1 - then test with java -jar ~/paulauploader/target/paulauploader.jar sync-pull
 
 set -euo pipefail
 
@@ -112,26 +118,6 @@ sudo apt-get update
 sudo apt-get install -y default-jdk maven postgresql python3 python3-pip python-is-python3 rsync git curl \
   ifupdown isc-dhcp-client wpasupplicant hostapd dnsmasq iptables
 
-echo "== Disabling NetworkManager - using the classic ifupdown/wpa_supplicant/hostapd stack instead =="
-# Ported directly from ~/Data/Teleonome/digitalgeppettowebapp's CreateTeleonome.sh /
-# network_with_internal_mode.sh, a dual-WiFi (AP + client) setup that's been working in the field
-# for years. NetworkManager's live reconfiguration and systemd-networkd/wpa_supplicant@.service's
-# lack of any built-in wait-for-device ordering both caused real, repeated failures earlier
-# (2026-09-04) - ifupdown + a retrying /etc/rc.local (below) sidesteps both problems entirely by
-# just not depending on systemd unit ordering being right at all.
-sudo systemctl disable --now NetworkManager 2>/dev/null || true
-sudo systemctl mask NetworkManager 2>/dev/null || true
-
-# Confirmed gotcha (2026-09-08): NetworkManager's own normal job includes auto-clearing rfkill
-# soft-blocks for wireless devices it manages - with it disabled (above), nothing does that
-# anymore. A USB WiFi dongle can come up soft-blocked by default (or the kernel can apply one
-# itself for a radio with no established regulatory domain yet), and ifup then fails with
-# "RTNETLINK answers: Operation not possible due to RF-kill" / "Network is down" on every DHCP
-# attempt - confirmed directly on a from-scratch Paula reinstall, wlan0 was unaffected (came up
-# fine) but wlan1 was rfkill-blocked. Unblocking here, and again in rc.local (below) on every boot,
-# since this can plausibly reappear on a fresh hotplug rather than being a one-time state.
-sudo rfkill unblock all 2>/dev/null || true
-
 echo "== Ensure SSH is enabled =="
 sudo systemctl enable ssh
 # Tolerate a leftover sshd already bound to :22 from an earlier boot/session (confirmed
@@ -155,10 +141,221 @@ echo "== Ensure passwordless sudo for $USER =="
 echo "$USER ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/010_${USER}-nopasswd" > /dev/null
 sudo chmod 440 "/etc/sudoers.d/010_${USER}-nopasswd"
 
+echo "== Serial port access without root - dialout group =="
+sudo usermod -a -G dialout "$USER"
+echo "NOTE: takes effect on next login/reboot, not this shell."
+
+echo "== pyserial for esptool.py (same gotcha the factory NUC itself hit - see project memory) =="
+# Confirmed gotcha (2026-09-06): even `pip3 install --break-system-packages pyserial` can still
+# hit PEP 668's "externally-managed-environment" error on Trixie. Debian's own packaged pyserial
+# sidesteps the whole pip-vs-system-Python fight entirely - apt is the sanctioned path here, not
+# a pip flag.
+sudo apt-get install -y python3-serial
+
+echo "== Local Postgres for paulauploader =="
+sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='paulauploader'" | grep -q 1 || \
+  sudo -u postgres psql -c "CREATE ROLE paulauploader LOGIN PASSWORD 'paulauploader';"
+sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='paulauploader'" | grep -q 1 || \
+  sudo -u postgres createdb -O paulauploader paulauploader
+
+psql "postgresql://paulauploader:paulauploader@127.0.0.1:5432/paulauploader" -c "
+create table if not exists pendingDeployment(
+    id int primary key,
+    productid int,
+    productname varchar(100),
+    serialnumber varchar(50),
+    firmwarerepositoryname varchar(100),
+    firmwareid int,
+    firmwareversion int,
+    binpath text,
+    partitionspath text,
+    downloadedon bigint
+);
+create table if not exists deploymentResult(
+    id serial primary key,
+    deploymentid int,
+    productid int,
+    success boolean,
+    firmwareid int,
+    firmwareversion int,
+    flashedon bigint,
+    reported boolean default false
+);
+create table if not exists deployAttempt(
+    id serial primary key,
+    manifestfile varchar(200) not null,
+    productid int,
+    productname varchar(100),
+    serialnumber varchar(50),
+    reponame varchar(100),
+    version int,
+    startedon bigint,
+    completedon bigint,
+    status varchar(20) default 'Running',
+    terminallog text,
+    reported boolean default false,
+    productdefinitionid int
+);
+"
+
+echo "== Cloning and building paulauploader from GitHub =="
+if [ -d "$HOME/paulauploader/.git" ]; then
+  git -C "$HOME/paulauploader" pull
+else
+  git clone "$REPO_URL" "$HOME/paulauploader"
+fi
+mvn -f "$HOME/paulauploader/pom.xml" package
+
+echo "== Installing Tomcat for PaulaDeployer (the field-operations webapp, ~/Data/DigitalStables/PaulaDeployer) =="
+# 8.5.100 specifically (not "latest 9.x/10.x/11.x") to match the factory NUC's own Tomcat
+# (confirmed running 8.5.78) - same javax.servlet.* API (Tomcat 10+ switched to jakarta.servlet.*,
+# a breaking rename), so anything modeled on the factory webapp's ProcessingFormHandler pattern
+# drops in without a namespace mismatch. Note: the 8.5.x line is EOL (final release, no more
+# security patches) - accepted tradeoff for API compatibility with the existing factory webapp,
+# but worth knowing if this is meant to run somewhere internet-exposed.
+# Lives under ~/pauladeployer, not ~/paulauploader - a separate directory for PaulaDeployer (the
+# webapp Tomcat actually serves) rather than nested inside this CLI tool's own project folder,
+# even though this script (PaulaUploader's own) is what provisions it. Self-contained tarball
+# extraction rather than `apt install tomcatN` - keeps the exact version pinned regardless of
+# whatever Trixie's own package happens to ship.
+TOMCAT_VERSION="8.5.100"
+TOMCAT_DIR="$HOME/pauladeployer/tomcat"
+# Confirmed gotcha (2026-09-07): checking just "does $TOMCAT_DIR exist" isn't enough - an earlier
+# interrupted run (network hiccup mid-download, disk space, or the script aborting at some later
+# step) can leave an empty/partial directory behind from mkdir -p having already run before the
+# actual extraction finished. Every run after that then saw the directory "already present" and
+# skipped reinstalling forever, silently leaving Tomcat never actually installed. Check for a real
+# marker file (bin/catalina.sh, only present after a genuinely complete extraction) instead, and
+# wipe out and redo any incomplete leftover rather than trusting it.
+if [ ! -x "$TOMCAT_DIR/bin/catalina.sh" ]; then
+  rm -rf "$TOMCAT_DIR"
+  TOMCAT_TARBALL="/tmp/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
+  curl -fsSL -o "$TOMCAT_TARBALL" \
+    "https://archive.apache.org/dist/tomcat/tomcat-8/v${TOMCAT_VERSION}/bin/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
+  mkdir -p "$TOMCAT_DIR"
+  tar -xzf "$TOMCAT_TARBALL" -C "$TOMCAT_DIR" --strip-components=1
+  rm -f "$TOMCAT_TARBALL"
+  chmod +x "$TOMCAT_DIR"/bin/*.sh
+  if [ ! -x "$TOMCAT_DIR/bin/catalina.sh" ]; then
+    echo "ERROR: Tomcat extraction did not produce $TOMCAT_DIR/bin/catalina.sh - download or"
+    echo "extraction failed. Check disk space (df -h) and network, then re-run."
+    exit 1
+  fi
+  echo "Tomcat $TOMCAT_VERSION extracted to $TOMCAT_DIR - deploy a WAR to $TOMCAT_DIR/webapps/,"
+  echo "start with $TOMCAT_DIR/bin/startup.sh, stop with $TOMCAT_DIR/bin/shutdown.sh."
+else
+  echo "Tomcat already present and looks valid at $TOMCAT_DIR - leaving it as-is (delete the folder and re-run to reinstall)."
+fi
+
+# Confirmed gotcha (2026-09-04/05): Tomcat's stock webapps/ROOT sample app shadows any ROOT.war
+# dropped in next to it (a directory takes priority over the war of the same name) - remove it
+# once, before this Pi's own ROOT.war ever lands, so PaulaDeployer is what actually answers "/".
+rm -rf "$TOMCAT_DIR/webapps/ROOT"
+
+echo "== Cloning and building PaulaDeployer (the field-operations webapp) from GitHub =="
+# Built here, not copied from a dev machine's scp step - PaulaDeployer's own pom.xml has a
+# maven-antrun-plugin that scp's its WAR to a Paula over SSH using a DEV MACHINE's private key
+# (see its pom.xml's server.address/private.key properties), which doesn't exist on Paula itself
+# and isn't needed here anyway since the build already IS on the target - -Dmaven.antrun.skip=true
+# skips that step, then the built WAR is copied straight into Tomcat's webapps/ locally.
+if [ -d "$HOME/pauladeployer-src/.git" ]; then
+  git -C "$HOME/pauladeployer-src" pull
+else
+  git clone "$PAULADEPLOYER_REPO_URL" "$HOME/pauladeployer-src"
+fi
+mvn -f "$HOME/pauladeployer-src/pom.xml" package -Dmaven.antrun.skip=true
+cp "$HOME/pauladeployer-src/target/ROOT.war" "$TOMCAT_DIR/webapps/ROOT.war"
+
+echo "== Installing a systemd service so Tomcat starts automatically on every boot =="
+# Confirmed gotcha (2026-09-05): without this, Tomcat only ever ran when someone manually SSH'd
+# in and ran startup.sh - fine on a bench, useless in the field where there's no monitor/keyboard
+# and a power cycle (or a crash) would otherwise leave PaulaDeployer silently unreachable with no
+# way to notice short of trying to load it. Type=forking + CATALINA_PID lets systemd track the
+# actual java process via Tomcat's own startup.sh/shutdown.sh rather than needing catalina.sh's
+# foreground "run" mode. Restart=on-failure so a crash also self-heals without a manual visit.
+sudo tee /etc/systemd/system/pauladeployer-tomcat.service > /dev/null <<EOF
+[Unit]
+Description=Tomcat for PaulaDeployer
+After=network.target postgresql.service
+
+[Service]
+Type=forking
+User=pi
+Environment=CATALINA_HOME=$TOMCAT_DIR
+Environment=CATALINA_PID=$TOMCAT_DIR/temp/tomcat.pid
+ExecStart=$TOMCAT_DIR/bin/startup.sh
+ExecStop=$TOMCAT_DIR/bin/shutdown.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable pauladeployer-tomcat
+
+echo "== Checking whether the NUC is reachable (needed for the esptool/bootloader fetch below) =="
+# Non-fatal if the NUC isn't reachable - everything above this point (Postgres, the CLI, Tomcat,
+# PaulaDeployer) is already fully installed and working regardless, so an unreachable NUC should
+# only mean "flashing won't work yet", not "provisioning failed". In practice a Paula is always
+# provisioned on the factory network, so this is a robustness improvement for an unexpected outage
+# rather than something expected to trigger often.
+NUC_REACHABLE=true
+if [ ! -f "$NUC_KEY" ]; then
+  echo "No key at $NUC_KEY yet - generating one now."
+  ssh-keygen -t ed25519 -f "$NUC_KEY" -N ""
+fi
+# If this key was copied in manually (e.g. reusing an existing key from another machine) rather
+# than generated fresh above, its permissions often don't survive the copy - ssh silently refuses
+# a group/world-readable private key rather than erroring clearly, which looks identical to "not
+# trusted yet" from the check below. Fix it unconditionally rather than trying to detect it.
+chmod 600 "$NUC_KEY"
+if ! ssh -o BatchMode=yes -o ConnectTimeout=5 -i "$NUC_KEY" "${NUC_USER}@${NUC_HOST}" true 2>/dev/null; then
+  NUC_REACHABLE=false
+  echo "This Pi's key isn't installed on the NUC yet (or the NUC isn't reachable right now)."
+  echo "Everything else (Postgres, the CLI, Tomcat, PaulaDeployer) is already installed and"
+  echo "working - only the esptool/bootloader toolchain (needed for an actual flash) is being"
+  echo "skipped. Once the NUC is reachable, run this once, then re-run this script to pick it up:"
+  echo "  ssh-copy-id -i ${NUC_KEY}.pub ${NUC_USER}@${NUC_HOST}"
+  echo "(it'll ask for ${NUC_USER}'s NUC password once, then never again)"
+fi
+
+if [ "$NUC_REACHABLE" = true ]; then
+  echo "== Fetching esptool + bootloader files from the NUC (matches FirmwareFlasher's hardcoded paths) =="
+  mkdir -p "$HOME/.arduino15/packages/esp32/tools/esptool_py/3.0.0"
+  mkdir -p "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions"
+  mkdir -p "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin"
+
+  rsync -av -e "ssh -i $NUC_KEY" \
+    "${NUC_USER}@${NUC_HOST}:.arduino15/packages/esp32/tools/esptool_py/3.0.0/" \
+    "$HOME/.arduino15/packages/esp32/tools/esptool_py/3.0.0/"
+
+  rsync -av -e "ssh -i $NUC_KEY" \
+    "${NUC_USER}@${NUC_HOST}:.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions/boot_app0.bin" \
+    "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions/boot_app0.bin"
+
+  rsync -av -e "ssh -i $NUC_KEY" \
+    "${NUC_USER}@${NUC_HOST}:.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin/bootloader_dio_80m.bin" \
+    "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin/bootloader_dio_80m.bin"
+fi
+
+# Everything below this point is the actual WiFi reconfiguration - deliberately last, right before
+# the reboot. Confirmed gotcha (2026-09-08): this whole block used to run much earlier, right after
+# the apt installs. Disabling NetworkManager tears down whatever connection it's CURRENTLY managing
+# immediately, not just at the eventual reboot - on a freshly-imaged Pi where the initial WiFi (set
+# up via raspi-config, joined to the office/factory network for internet access during setup) is
+# itself NetworkManager-managed, that meant everything below the old position - both git
+# clone+builds, the Tomcat download, the NUC esptool fetch - lost all network connectivity the
+# moment NetworkManager was disabled, since nothing replaces it until the final reboot (nothing
+# WiFi-related is started live, by design - see the top of this file). Confirmed directly: a
+# from-scratch run hung/failed silently for 30+ minutes with no way to diagnose it remotely, because
+# the very SSH connection used to watch it had also gone down along with the network. Moving this
+# whole block to genuinely be the last thing before the reboot means every network-dependent step
+# above already completed using whatever connection was active BEFORE any of this ran.
 echo "== Detecting WiFi interfaces (built-in radio vs USB adapter) =="
 # Identify the built-in radio by its driver (brcmfmac, Broadcom - what every Pi's onboard WiFi
 # uses) instead of by enumeration order; whatever other wifi device shows up (if any) is treated
-# as the USB adapter. Pure sysfs, no NetworkManager/nmcli dependency (disabled above).
+# as the USB adapter. Pure sysfs, no NetworkManager/nmcli dependency (about to be disabled below).
 #
 # Confirmed gotcha (2026-09-07): kernel enumeration order between the SDIO-attached built-in
 # radio and a USB dongle is NOT guaranteed stable across reboots - confirmed directly on Paula2,
@@ -199,6 +396,26 @@ if [ -n "$CURRENT_BUILTIN_DEV" ]; then
 ACTION=="add", SUBSYSTEM=="net", DRIVERS=="brcmfmac", NAME="${BUILTIN_WIFI}"
 EOF
 fi
+
+echo "== Disabling NetworkManager - using the classic ifupdown/wpa_supplicant/hostapd stack instead =="
+# Ported directly from ~/Data/Teleonome/digitalgeppettowebapp's CreateTeleonome.sh /
+# network_with_internal_mode.sh, a dual-WiFi (AP + client) setup that's been working in the field
+# for years. NetworkManager's live reconfiguration and systemd-networkd/wpa_supplicant@.service's
+# lack of any built-in wait-for-device ordering both caused real, repeated failures earlier
+# (2026-09-04) - ifupdown + a retrying /etc/rc.local (below) sidesteps both problems entirely by
+# just not depending on systemd unit ordering being right at all.
+sudo systemctl disable --now NetworkManager 2>/dev/null || true
+sudo systemctl mask NetworkManager 2>/dev/null || true
+
+# Confirmed gotcha (2026-09-08): NetworkManager's own normal job includes auto-clearing rfkill
+# soft-blocks for wireless devices it manages - with it disabled (above), nothing does that
+# anymore. A USB WiFi dongle can come up soft-blocked by default (or the kernel can apply one
+# itself for a radio with no established regulatory domain yet), and ifup then fails with
+# "RTNETLINK answers: Operation not possible due to RF-kill" / "Network is down" on every DHCP
+# attempt - confirmed directly on a from-scratch Paula reinstall, wlan0 was unaffected (came up
+# fine) but wlan1 was rfkill-blocked. Unblocking here, and again in rc.local (below) on every boot,
+# since this can plausibly reappear on a fresh hotplug rather than being a one-time state.
+sudo rfkill unblock all 2>/dev/null || true
 
 echo "== Writing field-WiFi config: hostapd+dnsmasq AP on $BUILTIN_WIFI, wpa_supplicant client on ${USB_WIFI:-<none>} =="
 # Classic ifupdown/hostapd/dnsmasq/wpa_supplicant stack, ported from
@@ -389,211 +606,6 @@ EOF
 echo "exit 0" | sudo tee -a /etc/rc.local > /dev/null
 sudo chmod +x /etc/rc.local
 sudo systemctl enable rc-local 2>/dev/null || true
-
-echo "== Serial port access without root - dialout group =="
-sudo usermod -a -G dialout "$USER"
-echo "NOTE: takes effect on next login/reboot, not this shell."
-
-echo "== pyserial for esptool.py (same gotcha the factory NUC itself hit - see project memory) =="
-# Confirmed gotcha (2026-09-06): even `pip3 install --break-system-packages pyserial` can still
-# hit PEP 668's "externally-managed-environment" error on Trixie. Debian's own packaged pyserial
-# sidesteps the whole pip-vs-system-Python fight entirely - apt is the sanctioned path here, not
-# a pip flag.
-sudo apt-get install -y python3-serial
-
-echo "== Local Postgres for paulauploader =="
-sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='paulauploader'" | grep -q 1 || \
-  sudo -u postgres psql -c "CREATE ROLE paulauploader LOGIN PASSWORD 'paulauploader';"
-sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='paulauploader'" | grep -q 1 || \
-  sudo -u postgres createdb -O paulauploader paulauploader
-
-psql "postgresql://paulauploader:paulauploader@127.0.0.1:5432/paulauploader" -c "
-create table if not exists pendingDeployment(
-    id int primary key,
-    productid int,
-    productname varchar(100),
-    serialnumber varchar(50),
-    firmwarerepositoryname varchar(100),
-    firmwareid int,
-    firmwareversion int,
-    binpath text,
-    partitionspath text,
-    downloadedon bigint
-);
-create table if not exists deploymentResult(
-    id serial primary key,
-    deploymentid int,
-    productid int,
-    success boolean,
-    firmwareid int,
-    firmwareversion int,
-    flashedon bigint,
-    reported boolean default false
-);
-create table if not exists deployAttempt(
-    id serial primary key,
-    manifestfile varchar(200) not null,
-    productid int,
-    productname varchar(100),
-    serialnumber varchar(50),
-    reponame varchar(100),
-    version int,
-    startedon bigint,
-    completedon bigint,
-    status varchar(20) default 'Running',
-    terminallog text,
-    reported boolean default false,
-    productdefinitionid int
-);
-"
-
-# Audit pass (2026-09-08): the NUC-key check + esptool/bootloader fetch used to sit HERE, before
-# PaulaUploader/Tomcat/PaulaDeployer install, and hard-exited the whole script if the NUC wasn't
-# reachable - meaning a Pi provisioned without NUC access never got Tomcat or PaulaDeployer
-# installed at all, even though neither actually depends on the NUC. In practice a Paula is always
-# provisioned on the factory network (NUC reachable), so this hasn't actually bitten - moved as a
-# robustness improvement regardless, plus the NUC check no longer hard-exits (see below), so even
-# an unexpected NUC outage during provisioning still leaves a fully working Tomcat/PaulaDeployer.
-echo "== Cloning and building paulauploader from GitHub =="
-if [ -d "$HOME/paulauploader/.git" ]; then
-  git -C "$HOME/paulauploader" pull
-else
-  git clone "$REPO_URL" "$HOME/paulauploader"
-fi
-mvn -f "$HOME/paulauploader/pom.xml" package
-
-echo "== Installing Tomcat for PaulaDeployer (the field-operations webapp, ~/Data/DigitalStables/PaulaDeployer) =="
-# 8.5.100 specifically (not "latest 9.x/10.x/11.x") to match the factory NUC's own Tomcat
-# (confirmed running 8.5.78) - same javax.servlet.* API (Tomcat 10+ switched to jakarta.servlet.*,
-# a breaking rename), so anything modeled on the factory webapp's ProcessingFormHandler pattern
-# drops in without a namespace mismatch. Note: the 8.5.x line is EOL (final release, no more
-# security patches) - accepted tradeoff for API compatibility with the existing factory webapp,
-# but worth knowing if this is meant to run somewhere internet-exposed.
-# Lives under ~/pauladeployer, not ~/paulauploader - a separate directory for PaulaDeployer (the
-# webapp Tomcat actually serves) rather than nested inside this CLI tool's own project folder,
-# even though this script (PaulaUploader's own) is what provisions it. Self-contained tarball
-# extraction rather than `apt install tomcatN` - keeps the exact version pinned regardless of
-# whatever Trixie's own package happens to ship.
-TOMCAT_VERSION="8.5.100"
-TOMCAT_DIR="$HOME/pauladeployer/tomcat"
-# Confirmed gotcha (2026-09-07): checking just "does $TOMCAT_DIR exist" isn't enough - an earlier
-# interrupted run (network hiccup mid-download, disk space, or the script aborting at some later
-# step) can leave an empty/partial directory behind from mkdir -p having already run before the
-# actual extraction finished. Every run after that then saw the directory "already present" and
-# skipped reinstalling forever, silently leaving Tomcat never actually installed. Check for a real
-# marker file (bin/catalina.sh, only present after a genuinely complete extraction) instead, and
-# wipe out and redo any incomplete leftover rather than trusting it.
-if [ ! -x "$TOMCAT_DIR/bin/catalina.sh" ]; then
-  rm -rf "$TOMCAT_DIR"
-  TOMCAT_TARBALL="/tmp/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
-  curl -fsSL -o "$TOMCAT_TARBALL" \
-    "https://archive.apache.org/dist/tomcat/tomcat-8/v${TOMCAT_VERSION}/bin/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
-  mkdir -p "$TOMCAT_DIR"
-  tar -xzf "$TOMCAT_TARBALL" -C "$TOMCAT_DIR" --strip-components=1
-  rm -f "$TOMCAT_TARBALL"
-  chmod +x "$TOMCAT_DIR"/bin/*.sh
-  if [ ! -x "$TOMCAT_DIR/bin/catalina.sh" ]; then
-    echo "ERROR: Tomcat extraction did not produce $TOMCAT_DIR/bin/catalina.sh - download or"
-    echo "extraction failed. Check disk space (df -h) and network, then re-run."
-    exit 1
-  fi
-  echo "Tomcat $TOMCAT_VERSION extracted to $TOMCAT_DIR - deploy a WAR to $TOMCAT_DIR/webapps/,"
-  echo "start with $TOMCAT_DIR/bin/startup.sh, stop with $TOMCAT_DIR/bin/shutdown.sh."
-else
-  echo "Tomcat already present and looks valid at $TOMCAT_DIR - leaving it as-is (delete the folder and re-run to reinstall)."
-fi
-
-# Confirmed gotcha (2026-09-04/05): Tomcat's stock webapps/ROOT sample app shadows any ROOT.war
-# dropped in next to it (a directory takes priority over the war of the same name) - remove it
-# once, before this Pi's own ROOT.war ever lands, so PaulaDeployer is what actually answers "/".
-rm -rf "$TOMCAT_DIR/webapps/ROOT"
-
-echo "== Cloning and building PaulaDeployer (the field-operations webapp) from GitHub =="
-# Built here, not copied from a dev machine's scp step - PaulaDeployer's own pom.xml has a
-# maven-antrun-plugin that scp's its WAR to a Paula over SSH using a DEV MACHINE's private key
-# (see its pom.xml's server.address/private.key properties), which doesn't exist on Paula itself
-# and isn't needed here anyway since the build already IS on the target - -Dmaven.antrun.skip=true
-# skips that step, then the built WAR is copied straight into Tomcat's webapps/ locally.
-if [ -d "$HOME/pauladeployer-src/.git" ]; then
-  git -C "$HOME/pauladeployer-src" pull
-else
-  git clone "$PAULADEPLOYER_REPO_URL" "$HOME/pauladeployer-src"
-fi
-mvn -f "$HOME/pauladeployer-src/pom.xml" package -Dmaven.antrun.skip=true
-cp "$HOME/pauladeployer-src/target/ROOT.war" "$TOMCAT_DIR/webapps/ROOT.war"
-
-echo "== Installing a systemd service so Tomcat starts automatically on every boot =="
-# Confirmed gotcha (2026-09-05): without this, Tomcat only ever ran when someone manually SSH'd
-# in and ran startup.sh - fine on a bench, useless in the field where there's no monitor/keyboard
-# and a power cycle (or a crash) would otherwise leave PaulaDeployer silently unreachable with no
-# way to notice short of trying to load it. Type=forking + CATALINA_PID lets systemd track the
-# actual java process via Tomcat's own startup.sh/shutdown.sh rather than needing catalina.sh's
-# foreground "run" mode. Restart=on-failure so a crash also self-heals without a manual visit.
-sudo tee /etc/systemd/system/pauladeployer-tomcat.service > /dev/null <<EOF
-[Unit]
-Description=Tomcat for PaulaDeployer
-After=network.target postgresql.service
-
-[Service]
-Type=forking
-User=pi
-Environment=CATALINA_HOME=$TOMCAT_DIR
-Environment=CATALINA_PID=$TOMCAT_DIR/temp/tomcat.pid
-ExecStart=$TOMCAT_DIR/bin/startup.sh
-ExecStop=$TOMCAT_DIR/bin/shutdown.sh
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-sudo systemctl daemon-reload
-sudo systemctl enable pauladeployer-tomcat
-
-echo "== Checking whether the NUC is reachable (needed for the esptool/bootloader fetch below) =="
-# No longer hard-exits if the NUC isn't reachable (confirmed 2026-09-08) - everything above this
-# point (Postgres, the CLI, Tomcat, PaulaDeployer) is already fully installed and working
-# regardless, so an unreachable NUC should only mean "flashing won't work yet", not "provisioning
-# failed". In practice a Paula is always provisioned on the factory network, so this is a
-# robustness improvement for an unexpected outage rather than something expected to trigger often.
-NUC_REACHABLE=true
-if [ ! -f "$NUC_KEY" ]; then
-  echo "No key at $NUC_KEY yet - generating one now."
-  ssh-keygen -t ed25519 -f "$NUC_KEY" -N ""
-fi
-# If this key was copied in manually (e.g. reusing an existing key from another machine) rather
-# than generated fresh above, its permissions often don't survive the copy - ssh silently refuses
-# a group/world-readable private key rather than erroring clearly, which looks identical to "not
-# trusted yet" from the check below. Fix it unconditionally rather than trying to detect it.
-chmod 600 "$NUC_KEY"
-if ! ssh -o BatchMode=yes -o ConnectTimeout=5 -i "$NUC_KEY" "${NUC_USER}@${NUC_HOST}" true 2>/dev/null; then
-  NUC_REACHABLE=false
-  echo "This Pi's key isn't installed on the NUC yet (or the NUC isn't reachable right now)."
-  echo "Everything else (Postgres, the CLI, Tomcat, PaulaDeployer) is already installed and"
-  echo "working - only the esptool/bootloader toolchain (needed for an actual flash) is being"
-  echo "skipped. Once the NUC is reachable, run this once, then re-run this script to pick it up:"
-  echo "  ssh-copy-id -i ${NUC_KEY}.pub ${NUC_USER}@${NUC_HOST}"
-  echo "(it'll ask for ${NUC_USER}'s NUC password once, then never again)"
-fi
-
-if [ "$NUC_REACHABLE" = true ]; then
-  echo "== Fetching esptool + bootloader files from the NUC (matches FirmwareFlasher's hardcoded paths) =="
-  mkdir -p "$HOME/.arduino15/packages/esp32/tools/esptool_py/3.0.0"
-  mkdir -p "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions"
-  mkdir -p "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin"
-
-  rsync -av -e "ssh -i $NUC_KEY" \
-    "${NUC_USER}@${NUC_HOST}:.arduino15/packages/esp32/tools/esptool_py/3.0.0/" \
-    "$HOME/.arduino15/packages/esp32/tools/esptool_py/3.0.0/"
-
-  rsync -av -e "ssh -i $NUC_KEY" \
-    "${NUC_USER}@${NUC_HOST}:.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions/boot_app0.bin" \
-    "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/partitions/boot_app0.bin"
-
-  rsync -av -e "ssh -i $NUC_KEY" \
-    "${NUC_USER}@${NUC_HOST}:.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin/bootloader_dio_80m.bin" \
-    "$HOME/.arduino15/packages/esp32/hardware/esp32/1.0.6/tools/sdk/bin/bootloader_dio_80m.bin"
-fi
 
 echo ""
 echo "== Everything installed and configured. Rebooting in 5 seconds to apply it all at once =="
