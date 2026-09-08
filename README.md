@@ -7,22 +7,31 @@ pushes results back once reconnected.
 
 ## Provisioning a fresh Pi
 
-Run on the Pi itself, from its local keyboard/monitor - not over SSH, and not run remotely by
-Claude either. The script reconfigures the network and reboots at the end; over SSH that can drop
-the very connection you're using, and there's no way to recover the Pi remotely if that happens
-mid-run.
+Start with a plain Raspberry Pi OS **Trixie** (64-bit; Lite is fine, no desktop needed) image on
+the SD card - Raspberry Pi Imager, no advanced customization needed beyond enabling SSH and a
+username/password if you want. Boot it with a keyboard and monitor connected directly to it.
 
-First, set the hostname (`raspi-config` -> System Options -> Hostname, e.g. `paula2` - the field
-hotspot's SSID defaults to it, so each Pi in the field is easy to tell apart) and join the
-office/factory WiFi (`raspi-config` -> System Options -> Wireless LAN) for internet access during
-setup. Then:
+Run everything below on the Pi itself, from its own local keyboard/monitor - not over SSH, and not
+run remotely by Claude either. The script reconfigures the network and reboots at the end; over
+SSH that can drop the very connection you're using, and there's no way to recover the Pi remotely
+if that happens mid-run.
 
-```bash
-git clone https://github.com/arifainchtein/PaulaUploader.git
-cd PaulaUploader
-chmod +x provision-pi.sh
-./provision-pi.sh
-```
+1. `sudo raspi-config`, in order:
+   - **Localisation Options -> WLAN Country** - set it first. The radio won't transmit at all
+     without a country set, so do this before joining any WiFi network below.
+   - **System Options -> Hostname** - set it (e.g. `paula2`). The field hotspot's SSID defaults to
+     this, so each Pi in the field is easy to tell apart.
+   - **System Options -> Wireless LAN** - join the office/factory WiFi, for internet access during
+     setup and so the provisioning script can auto-detect it later (see below).
+   - Finish, reboot if prompted. Confirm it worked: `ip a show wlan0` should show an IP address.
+2. `sudo apt-get update && sudo apt-get install -y git`
+3. Clone and run:
+   ```bash
+   git clone https://github.com/arifainchtein/PaulaUploader.git
+   cd PaulaUploader
+   chmod +x provision-pi.sh
+   ./provision-pi.sh
+   ```
 
 The factory-network WiFi a USB dongle joins for `sync-pull`/`sync-push` defaults to whatever
 network you just joined above (auto-detected via `nmcli` while it's still active) - no need to
