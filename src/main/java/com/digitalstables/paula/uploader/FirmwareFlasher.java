@@ -86,6 +86,12 @@ public class FirmwareFlasher {
 
 		StringBuffer command = new StringBuffer();
 		command.append("#!/bin/bash" + System.lineSeparator());
+		// Confirmed gotcha (2026-09-09, on PaulaDeployer's copy of this same code): without
+		// `set -e`, a failing esptool line (missing tool, bad port, anything) just printed its
+		// error and fell through to the unconditional `touch` below, which always succeeds -
+		// making flash()'s success check (exitCode==0 && completeFile.isFile()) meaningless. Every
+		// "successful" flash could have silently been a no-op the whole time this bug existed.
+		command.append("set -e" + System.lineSeparator());
 		command.append("python \"" + ESPTOOL_PATH + "\" ");
 		command.append("--chip esp32 --port \"" + portName + "\" --baud 921600 --before default_reset ");
 		command.append("--after hard_reset write_flash -z --flash_mode dio --flash_freq 80m ");
