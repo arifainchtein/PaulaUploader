@@ -99,7 +99,8 @@ public class FirmwareFlasher {
 		command.append("\"" + BOOT_APP0_PATH + "\" ");
 		command.append("0x1000 \"" + BOOTLOADER_PATH + "\" ");
 		command.append("0x10000 \"" + binPath + "\" ");
-		command.append("0x8000 \"" + partitionsPath + "\"" + System.lineSeparator());
+		command.append("0x8000 \"" + partitionsPath + "\" ");
+		command.append(WwwImage.writeFlashArgs(new File(partitionsPath)) + System.lineSeparator());
 		command.append("touch firmwareUploadComplete");
 
 		File uploadFile = new File(workDir, "upload.sh");

@@ -113,6 +113,14 @@ public class Main {
 		System.out.println("Downloading " + repositoryName + " v" + version + "...");
 		client.downloadFirmwareBinary(firmwareId, "bin", binPath);
 		client.downloadFirmwareBinary(firmwareId, "partitions", partitionsPath);
+		// Optional: the device's website as a LittleFS image for the firmware's www partition. A
+		// stale copy from an earlier download of this same version must not get flashed if the
+		// factory no longer has one, so clear it first; the factory answers 404 when a release has none.
+		File wwwFile = new File(jobDir, repositoryName + ".www.bin");
+		wwwFile.delete();
+		if (client.downloadFirmwareBinary(firmwareId, "www", wwwFile.getAbsolutePath())) {
+			System.out.println("Downloaded website image (" + wwwFile.length() + " bytes).");
+		}
 
 		store.saveCurrentJob(job.getInt("deploymentid"), job.getInt("productid"), job.getString("name"),
 				job.optString("serialnumber", ""), repositoryName, firmwareId, version, binPath, partitionsPath);
