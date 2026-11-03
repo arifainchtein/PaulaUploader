@@ -112,10 +112,19 @@ public class FirmwareFlasher {
 		pb.redirectErrorStream(true);
 		Process p = pb.start();
 
-		BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()));
+		// esptool prints its "Connecting........_____" dots with no newline until the attempt ends;
+		// read live so they show as they happen instead of all at once afterwards.
+		final boolean[] partialShown = {false};
+		LiveLineReader reader = new LiveLineReader(new InputStreamReader(p.getInputStream()), partial -> {
+			if (partial.startsWith("Connecting")) {
+				System.out.print("\resptool: " + partial);
+				partialShown[0] = true;
+			}
+		});
 		String line;
 		while ((line = reader.readLine()) != null) {
-			System.out.println("esptool: " + line);
+			System.out.println((partialShown[0] ? "\r" : "") + "esptool: " + line);
+			partialShown[0] = false;
 			if (line.startsWith("Serial port")) {
 				System.out.println("*** PRESS PROGRAM NOW ***");
 				PiStatusLed.blinkForProgramPrompt();

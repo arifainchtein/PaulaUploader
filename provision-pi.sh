@@ -71,6 +71,20 @@
 # hardware changes could swap which physical radio the kernel called wlan0 vs wlan1, silently
 # binding the hotspot to the wrong one). If you add/remove the USB adapter later, re-run this
 # script so it re-detects whether one is present at all.
+# Field networking (2026-11-03, see docs/Creating_a_Paula.pdf section 8):
+#   PHONE_HOTSPOT_SSID / PHONE_HOTSPOT_PASSWORD - the phone's 4G hotspot, a second network for wlan1
+#     at lower priority (1) than the factory/home network (10), so Paula uses the home WiFi when it can
+#     see it and the phone in the field. Written as a hex SSID, so an iPhone's curly apostrophe
+#     ("Ari’s iPhone") matches exactly - copy the name from the phone (Settings > General > About >
+#     Name), and turn on Maximize Compatibility on the iPhone (2.4 GHz).
+#   FACTORY_TUNNEL_IP - this Paula's own address in the Factory WireGuard tunnel (10.98.0.N; .1 is the
+#     router, .2 Ari's phone, .3 Paula3 - each Paula needs its own). Set it and the script installs the
+#     tunnel: wireguard-tools, a key made here (kept if one already exists), /etc/wireguard/factory.conf
+#     and factory-tunnel.timer, which keeps the tunnel down on the home WiFi (FACTORY_HOME_SSIDS) and up
+#     anywhere else. Unset: the tunnel is skipped. The router side is one more step from Ari's computer:
+#     tunnel/add-paula-to-router.sh (prints at the end of this script).
+#   FACTORY_HOME_SSIDS (default "MainRouter24 MainRouter") - networks where the tunnel stays down.
+#   e.g. PHONE_HOTSPOT_SSID='Ari’s iPhone' PHONE_HOTSPOT_PASSWORD='...' FACTORY_TUNNEL_IP=10.98.0.4 ./provision-pi.sh
 # WIFI_COUNTRY (default AU) sets both radios' regulatory domain - required for the built-in radio
 # to transmit at all; override if provisioning outside Australia.
 #
@@ -107,6 +121,21 @@ FIELD_PASSWORD="${FIELD_PASSWORD:-}"
 FACTORY_WIFI_SSID="${FACTORY_WIFI_SSID:-$(nmcli -t -f active,ssid dev wifi 2>/dev/null | grep '^yes:' | head -1 | cut -d: -f2 || true)}"
 FACTORY_WIFI_PASSWORD="${FACTORY_WIFI_PASSWORD:-}"
 WIFI_COUNTRY="${WIFI_COUNTRY:-AU}"
+PHONE_HOTSPOT_SSID="${PHONE_HOTSPOT_SSID:-}"
+PHONE_HOTSPOT_PASSWORD="${PHONE_HOTSPOT_PASSWORD:-}"
+FACTORY_TUNNEL_IP="${FACTORY_TUNNEL_IP:-}"
+FACTORY_HOME_SSIDS="${FACTORY_HOME_SSIDS:-MainRouter24 MainRouter}"
+# The other end of the tunnel: the OpenWrt One's wg_remote, reached through the chilhuacle relay
+# (doc 07, /home/ari/Data/OpenWrtOne/documents/07-network-rules-design.md). The same for every Paula.
+FACTORY_TUNNEL_PEER_KEY="${FACTORY_TUNNEL_PEER_KEY:-Ik24V8g6hJppFt9blOCUupUFk50j8o3n0IoctyzqeVo=}"
+FACTORY_TUNNEL_ENDPOINT="${FACTORY_TUNNEL_ENDPOINT:-104.154.239.253:51821}"
+# Only FACTORY2 (chat broker) and the router's tunnel address go through the tunnel - everything else
+# (map tiles, NTP, apt) uses the hotspot directly.
+FACTORY_TUNNEL_ALLOWED_IPS="${FACTORY_TUNNEL_ALLOWED_IPS:-192.168.1.138/32, 10.98.0.1/32}"
+if [ -n "$FACTORY_TUNNEL_IP" ] && ! [[ "$FACTORY_TUNNEL_IP" =~ ^10\.98\.0\.([0-9]+)$ && ${BASH_REMATCH[1]} -ge 3 && ${BASH_REMATCH[1]} -le 254 ]]; then
+  echo "ERROR: FACTORY_TUNNEL_IP='$FACTORY_TUNNEL_IP' - expected 10.98.0.N, N from 3 to 254 (.1 router, .2 Ari's phone)" >&2
+  exit 1
+fi
 CONSOLE_FONTSIZE="${CONSOLE_FONTSIZE:-16x32}"
 
 # Confirmed gotcha (2026-09-07): running an out-of-date checkout of this script (e.g. forgetting
@@ -127,10 +156,12 @@ else
 fi
 sudo setupcon --force 2>/dev/null || echo "   (setupcon not available yet - will take effect after first boot's console-setup runs)"
 
-echo "== Installing JDK, Maven, PostgreSQL, Python, git, ifupdown, hostapd, dnsmasq, iptables, curl =="
+echo "== Installing JDK, Maven, PostgreSQL, Python, git, ifupdown, hostapd, dnsmasq, iptables, curl, wireguard-tools =="
 sudo apt-get update
+# wireguard-tools (2026-11-03): the Factory tunnel (FACTORY_TUNNEL_IP) - installed always, here, because
+# after NetworkManager is disabled further down there is no network to install it with.
 sudo apt-get install -y default-jdk maven postgresql python3 python3-pip python-is-python3 rsync git curl \
-  ifupdown isc-dhcp-client wpasupplicant hostapd dnsmasq iptables
+  ifupdown isc-dhcp-client wpasupplicant hostapd dnsmasq iptables wireguard-tools
 
 echo "== Ensure SSH is enabled =="
 sudo systemctl enable ssh
@@ -517,30 +548,150 @@ dhcp-range=192.168.50.10,192.168.50.100,255.255.255.0,12h
 EOF
 sudo systemctl disable dnsmasq 2>/dev/null || true   # same - rc.local restarts it after hostapd is up
 
-if [ -n "$USB_WIFI" ] && [ -n "$FACTORY_WIFI_SSID" ]; then
-  echo "== $USB_WIFI will join factory network '$FACTORY_WIFI_SSID' on next boot =="
-  NETBLOCK="network={
+# wlan1's networks: the factory/home WiFi at priority 10, and (2026-11-03) the phone's 4G hotspot at
+# priority 1 - wpa_supplicant joins the home one whenever it can see it, the phone's otherwise.
+# PaulaDeployer's (i) popup can pin one of them for a while (WifiNetworkProcessingHandler).
+# The hotspot's SSID is written in hex: an iPhone's name has a curly apostrophe (Ari’s iPhone) that
+# has to match byte for byte, and quoting it in the config is where that goes wrong.
+hex_ssid() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
+NETBLOCKS=""
+if [ -n "$FACTORY_WIFI_SSID" ]; then
+  if [ -n "$FACTORY_WIFI_PASSWORD" ]; then FACTORY_AUTH="psk=\"${FACTORY_WIFI_PASSWORD}\""; else FACTORY_AUTH="key_mgmt=NONE"; fi
+  NETBLOCKS="${NETBLOCKS}
+# factory/home WiFi
+network={
     ssid=\"${FACTORY_WIFI_SSID}\"
-    key_mgmt=NONE
-}"
-  if [ -n "$FACTORY_WIFI_PASSWORD" ]; then
-    NETBLOCK="network={
-    ssid=\"${FACTORY_WIFI_SSID}\"
-    psk=\"${FACTORY_WIFI_PASSWORD}\"
-}"
-  fi
+    ${FACTORY_AUTH}
+    priority=10
+}
+"
+fi
+if [ -n "$PHONE_HOTSPOT_SSID" ]; then
+  if [ -n "$PHONE_HOTSPOT_PASSWORD" ]; then PHONE_AUTH="psk=\"${PHONE_HOTSPOT_PASSWORD}\""; else PHONE_AUTH="key_mgmt=NONE"; fi
+  NETBLOCKS="${NETBLOCKS}
+# the phone's 4G hotspot: ${PHONE_HOTSPOT_SSID}
+network={
+    ssid=$(hex_ssid "$PHONE_HOTSPOT_SSID")
+    ${PHONE_AUTH}
+    priority=1
+}
+"
+fi
+if [ -n "$USB_WIFI" ] && [ -n "$NETBLOCKS" ]; then
+  echo "== $USB_WIFI will join:${FACTORY_WIFI_SSID:+ '$FACTORY_WIFI_SSID' (priority 10)}${PHONE_HOTSPOT_SSID:+ '$PHONE_HOTSPOT_SSID' (priority 1)} =="
   sudo tee /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null <<EOF
 country=${WIFI_COUNTRY}
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
 update_config=1
-
-${NETBLOCK}
+${NETBLOCKS}
 EOF
+  sudo chmod 600 /etc/wpa_supplicant/wpa_supplicant.conf
 elif [ -n "$USB_WIFI" ]; then
-  echo "FACTORY_WIFI_SSID not set - $USB_WIFI has no network to join yet."
-  echo "Set FACTORY_WIFI_SSID and re-run, or write /etc/wpa_supplicant/wpa_supplicant.conf yourself."
+  echo "FACTORY_WIFI_SSID and PHONE_HOTSPOT_SSID not set - $USB_WIFI has no network to join yet."
+  echo "Set one and re-run, or write /etc/wpa_supplicant/wpa_supplicant.conf yourself."
 else
   echo "No USB WiFi adapter detected - skipping factory-network client setup. Plug one in and re-run to add it."
+fi
+[ -z "$PHONE_HOTSPOT_SSID" ] && echo "   (PHONE_HOTSPOT_SSID not set - no phone hotspot for the field; add it later in wpa_supplicant.conf, priority=1)"
+
+# ---- Factory WireGuard tunnel (2026-11-03; set up by hand on Paula3 2026-10-25, doc 07) ----
+# Away from home, Stream 2 Chat reaches the FactoryChat broker (FACTORY2 192.168.1.138:1883) through
+# WireGuard: Paula -> chilhuacle relay -> OpenWrt One wg_remote. factory-tunnel (every 15 s) keeps the
+# tunnel DOWN on the home WiFi, so at home the chat goes straight over the LAN and keeps working with
+# the satellite down, and UP on any other network. It also renews DHCP when wlan1 changes network,
+# since ifupdown's dhclient otherwise keeps the old lease. Nothing is started live here - the timer
+# starts at the reboot at the end of this script.
+FACTORY_TUNNEL_PUBKEY=""
+if [ -n "$FACTORY_TUNNEL_IP" ]; then
+  echo "== Factory tunnel: this Paula is $FACTORY_TUNNEL_IP =="
+  sudo install -d -m 700 /etc/wireguard
+  # Keep the key across re-runs: the router knows this Paula by it.
+  PRIVATE_KEY=$(sudo sed -n 's/^PrivateKey *= *//p' /etc/wireguard/factory.conf 2>/dev/null || true)
+  if [ -z "$PRIVATE_KEY" ]; then
+    PRIVATE_KEY=$(wg genkey)
+    echo "   new WireGuard key made"
+  else
+    echo "   keeping the existing WireGuard key"
+  fi
+  FACTORY_TUNNEL_PUBKEY=$(printf '%s' "$PRIVATE_KEY" | wg pubkey)
+  sudo tee /etc/wireguard/factory.conf > /dev/null <<EOF
+# Factory tunnel (provision-pi.sh) - brought up and down by factory-tunnel.timer, not at boot
+[Interface]
+PrivateKey = ${PRIVATE_KEY}
+Address = ${FACTORY_TUNNEL_IP}/32
+MTU = 1300
+
+[Peer]
+# OpenWrt One wg_remote, through the chilhuacle relay
+PublicKey = ${FACTORY_TUNNEL_PEER_KEY}
+Endpoint = ${FACTORY_TUNNEL_ENDPOINT}
+AllowedIPs = ${FACTORY_TUNNEL_ALLOWED_IPS}
+PersistentKeepalive = 25
+EOF
+  sudo chmod 600 /etc/wireguard/factory.conf
+  unset PRIVATE_KEY
+  # The public key and address, readable without sudo - tunnel/add-paula-to-router.sh fetches them.
+  printf '%s %s\n' "$FACTORY_TUNNEL_PUBKEY" "$FACTORY_TUNNEL_IP" > "$HOME/factory-tunnel.pub"
+  sudo systemctl disable wg-quick@factory 2>/dev/null || true   # the timer decides, never at boot
+
+  sudo tee /usr/local/sbin/factory-tunnel > /dev/null <<EOF
+#!/bin/sh
+# Factory tunnel switch (doc 07, provision-pi.sh): the WireGuard tunnel to FACTORY2 is up only when Paula
+# is NOT on the home Wi-Fi, so at home Stream 2 Chat goes straight over the LAN and keeps working when the
+# satellite is down. Run every 15 s by factory-tunnel.timer. Log: journalctl -t factory-tunnel
+HOME_SSIDS="${FACTORY_HOME_SSIDS}"
+IF=${USB_WIFI:-wlan1}
+EOF
+  sudo tee -a /usr/local/sbin/factory-tunnel > /dev/null <<'EOF'
+STATE=/run/factory-tunnel.ssid
+st=$(wpa_cli -i $IF status 2>/dev/null)
+ssid=$(echo "$st" | sed -n 's/^ssid=//p')
+wpa=$(echo "$st" | sed -n 's/^wpa_state=//p')
+last=$(cat $STATE 2>/dev/null)
+# a new network: ifupdown's dhclient keeps the old lease when wpa_supplicant moves, so get a fresh address
+if [ "$wpa" = COMPLETED ] && [ "$ssid" != "$last" ]; then
+	echo "$ssid" > $STATE
+	if [ -n "$last" ]; then
+		logger -t factory-tunnel "wifi $last -> $ssid, renewing DHCP"
+		dhclient -4 -r -pf /run/dhclient.$IF.pid -lf /var/lib/dhcp/dhclient.$IF.leases $IF
+		dhclient -4 -pf /run/dhclient.$IF.pid -lf /var/lib/dhcp/dhclient.$IF.leases $IF
+	fi
+fi
+up=no; ip link show factory >/dev/null 2>&1 && up=yes
+home=no; for h in $HOME_SSIDS; do [ "$ssid" = "$h" ] && home=yes; done
+if [ "$wpa" = COMPLETED ] && [ $home = no ]; then
+	[ $up = no ] && logger -t factory-tunnel "on $ssid: tunnel up" && wg-quick up factory
+else
+	[ $up = yes ] && logger -t factory-tunnel "on ${ssid:-no wifi}: tunnel down" && wg-quick down factory
+fi
+exit 0
+EOF
+  sudo chmod 755 /usr/local/sbin/factory-tunnel
+  sudo tee /etc/systemd/system/factory-tunnel.service > /dev/null <<'EOF'
+[Unit]
+Description=Factory WireGuard tunnel switch (up only away from the home Wi-Fi)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/factory-tunnel
+EOF
+  sudo tee /etc/systemd/system/factory-tunnel.timer > /dev/null <<'EOF'
+[Unit]
+Description=Check every 15 s whether Paula needs the Factory tunnel
+
+[Timer]
+OnBootSec=20
+OnUnitActiveSec=15
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+EOF
+  sudo systemctl daemon-reload
+  sudo systemctl enable factory-tunnel.timer
+  echo "   public key $FACTORY_TUNNEL_PUBKEY (also in ~/factory-tunnel.pub)"
+else
+  echo "== FACTORY_TUNNEL_IP not set - skipping the Factory tunnel (Stream 2 Chat then works only on the home WiFi) =="
 fi
 
 echo "== Writing /etc/rc.local to bring both radios up at the end of every boot, with retries =="
@@ -613,13 +764,28 @@ fi
 # apt-installed for real above, but ALSO guarded with `|| true` here as a second line of defense -
 # nothing after the WiFi bring-up in this script should ever be able to kill it again, no matter
 # what future edge case shows up here.
+# 443 -> 8443 likewise for HTTPS (2026-11-03) - harmless until https/enable-https.sh gives Tomcat a
+# certificate and an 8443 connector (nothing listens there before that).
 sudo tee -a /etc/rc.local > /dev/null <<'EOF'
 { iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080 2>/dev/null || \
   iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080; } || true
+{ iptables -t nat -C PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 8443 2>/dev/null || \
+  iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 8443; } || true
 EOF
 echo "exit 0" | sudo tee -a /etc/rc.local > /dev/null
 sudo chmod +x /etc/rc.local
 sudo systemctl enable rc-local 2>/dev/null || true
+
+# HTTPS (2026-11-03): phones only give their GPS to https pages, which PaulaDeployer's Nearby Devices
+# map needs. The certificate is made on Ari's computer (https/make-paula-cert.sh - it holds the
+# Digital Stables root key), so it can't be created here. If one was already copied in (re-run of
+# this script), switch HTTPS on now; otherwise it's a step after provisioning.
+HTTPS_ENABLED=false
+if [ -f "$TOMCAT_DIR/conf/paula-https.p12" ]; then
+  echo "== Certificate found - enabling HTTPS =="
+  bash "$(dirname "$(readlink -f "$0")")/https/enable-https.sh" && HTTPS_ENABLED=true || \
+    echo "WARNING: enable-https.sh failed - PaulaDeployer still works on plain http"
+fi
 
 echo ""
 echo "== Everything installed and configured. Rebooting in 5 seconds to apply it all at once =="
@@ -638,6 +804,14 @@ echo "  - To pick up future PaulaDeployer code changes: cd ~/pauladeployer-src &
 echo "    mvn package -Dmaven.antrun.skip=true && cp target/ROOT.war $TOMCAT_DIR/webapps/ROOT.war"
 echo "    && sudo systemctl restart pauladeployer-tomcat"
 echo "  - To pick up future code changes: cd ~/paulauploader && git pull && mvn package"
+if [ -n "$FACTORY_TUNNEL_PUBKEY" ]; then
+  echo "  - Factory tunnel: this Paula is $FACTORY_TUNNEL_IP. Tell the router about it, once, from"
+  echo "    your computer (on the home network): PaulaUploader/tunnel/add-paula-to-router.sh $(hostname)"
+fi
+if [ "$HTTPS_ENABLED" != true ]; then
+  echo "  - HTTPS (needed for the phone's GPS on the Nearby Devices map) is NOT set up yet. On your"
+  echo "    computer: PaulaUploader/https/make-paula-cert.sh $(hostname) --install"
+fi
 if [ "$NUC_REACHABLE" != true ]; then
   echo ""
   echo "  - NOTE: the esptool/bootloader toolchain was NOT fetched (no NUC access during this run)"

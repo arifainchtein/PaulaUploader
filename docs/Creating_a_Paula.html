@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Creating a Paula</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 18mm 16mm; }
+  body { font-family: "DejaVu Sans", "Segoe UI", Roboto, Arial, sans-serif; font-size: 10.5pt; line-height: 1.45; color: #1d2328; }
+  h1 { font-size: 22pt; margin: 0 0 4px 0; color: #1f4d17; }
+  .subtitle { color: #5a6570; margin-bottom: 18px; }
+  h2 { font-size: 14pt; color: #1f4d17; border-bottom: 2px solid #cfe3c8; padding-bottom: 3px; margin: 26px 0 8px 0; page-break-after: avoid; }
+  h3 { font-size: 11.5pt; margin: 16px 0 6px 0; page-break-after: avoid; }
+  p { margin: 6px 0; }
+  ul, ol { margin: 6px 0 6px 0; padding-left: 22px; }
+  li { margin: 3px 0; }
+  code { font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace; font-size: 9.2pt; background: #f1f3f5; padding: 0 3px; border-radius: 3px; }
+  pre { font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace; font-size: 8.8pt; background: #f4f6f8; border: 1px solid #e1e5e9; border-radius: 5px; padding: 8px 10px; white-space: pre-wrap; word-break: break-word; page-break-inside: avoid; margin: 6px 0 8px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 9.4pt; page-break-inside: auto; }
+  th, td { border: 1px solid #d5dbe0; padding: 5px 7px; text-align: left; vertical-align: top; }
+  th { background: #eef4ec; }
+  tr { page-break-inside: avoid; }
+  .note { background: #fff8db; border-left: 4px solid #f0b400; padding: 7px 10px; margin: 8px 0; page-break-inside: avoid; }
+  .warn { background: #fff0f0; border-left: 4px solid #e03131; padding: 7px 10px; margin: 8px 0; page-break-inside: avoid; }
+  .ok { background: #ebfbee; border-left: 4px solid #2f9e44; padding: 7px 10px; margin: 8px 0; page-break-inside: avoid; }
+  .toc { columns: 2; column-gap: 24px; font-size: 10pt; }
+  .toc li { margin: 2px 0; }
+  .diagram { font-family: "DejaVu Sans Mono", monospace; font-size: 8.8pt; background: #f8faf7; border: 1px solid #dfe8dc; padding: 8px 10px; white-space: pre; page-break-inside: avoid; }
+  .where { display: inline-block; font-size: 8.5pt; font-weight: 700; padding: 1px 6px; border-radius: 3px; margin-right: 4px; color: #fff; }
+  .w-pi { background: #6741d9; } .w-pc { background: #1c7ed6; } .w-phone { background: #e8590c; }
+</style>
+</head>
+<body>
+
+<h1>Creating a Paula</h1>
+<div class="subtitle">Digital Stables field toolkit: from a bare SD card to a working Paula with PaulaDeployer, the Nearby Devices map, and HTTPS.<br>
+Version 3 &middot; 3 November 2026 &middot; PaulaUploader repository, <code>docs/Creating_a_Paula.pdf</code></div>
+
+<p>Each step is marked with where it is done:
+<span class="where w-pi">PI</span> on the Paula Pi (its own keyboard and screen, or SSH where it says so),
+<span class="where w-pc">COMPUTER</span> on Ari's computer,
+<span class="where w-phone">PHONE</span> on the phone used in the field.</p>
+
+<ol class="toc">
+  <li>What a Paula is</li>
+  <li>What you need</li>
+  <li>Prepare the Raspberry Pi (SD card, raspi-config)</li>
+  <li>Run the provisioning script</li>
+  <li>Trust the Pi on the NUC</li>
+  <li>Flash Paula's ESP32 (Wally) with Paula.ino</li>
+  <li>HTTPS: certificate and phones</li>
+  <li>Field networking: phone hotspot and Factory tunnel</li>
+  <li>Paula's secret and clock</li>
+  <li>Final checks</li>
+  <li>Using the Nearby Devices map</li>
+  <li>Updating a Paula later</li>
+  <li>Troubleshooting</li>
+  <li>Reference: files, addresses, commands</li>
+</ol>
+
+<h2>1. What a Paula is</h2>
+<p>Paula is the field toolkit taken around the farm and to customers. It has two parts that work together:</p>
+<ul>
+  <li><strong>The Raspberry Pi</strong> (hostname e.g. <code>paula3</code>). It runs:
+    <ul>
+      <li><strong>PaulaDeployer</strong>, the phone web app: deploy queue, Inspect, Send Command, Nearby Devices map, Lora Sniffer, Stream 2 Chat, sensor tests. It runs in Tomcat 8.5.100 as the <code>pauladeployer-tomcat</code> service.</li>
+      <li><strong>PaulaUploader</strong>, the command-line tool that pulls deploy packages and firmware from the office NUC and flashes devices.</li>
+      <li>A local Postgres database shared by both.</li>
+    </ul></li>
+  <li><strong>Wally</strong>, Paula's own ESP32 board (Daffodil-style board with CP2104 USB, 433 MHz LoRa, OLED, WS2812 LEDs, PCF8563 clock), running <code>Paula.ino</code>. It listens to every LoRa packet on the farm, sends WiFi on/off commands to Daffodils, and does the bench sensor tests. It is plugged into the Pi by USB. PaulaDeployer finds it by its CP2104 USB ID (10C4:EA60) and by asking it <code>GetSwitchState</code>.</li>
+</ul>
+<p>The device being flashed or inspected (a Daffodil, for example) is plugged into the Pi by a second USB cable.</p>
+<div class="note">The Paula in use today is build 1 (<code>Paula.ino</code>) and has <strong>no GPS</strong>. On the map, the phone's GPS stands in for Paula's position. <code>Paula2.ino</code> is the build 2 board (GPS, RS485) and is not covered here except where noted.</div>
+
+<h3>Networks on a Paula</h3>
+<div class="diagram">            wlan0 (built-in radio)                     wlan1 (USB WiFi dongle)
+   Paula's own hotspot, SSID = hostname          joins a saved network:
+   address 192.168.50.1, DHCP .10-.100             - home/factory WiFi (priority 10)
+   phones/laptops join it in the field             - the phone's 4G hotspot (priority 1)
+                                               (Factory tunnel only away from home)</div>
+<p>PaulaDeployer answers on <code>http://</code> port 80 (redirected to 8080) and, once section 7 is done, on <code>https://</code> port 443 (redirected to 8443).</p>
+
+<h2>2. What you need</h2>
+<ul>
+  <li>Raspberry Pi (a Pi 3B or newer with built-in WiFi), a good SD card (16 GB or more) and a power supply.</li>
+  <li>A USB WiFi dongle, which becomes <code>wlan1</code>. Without it there is no client network in the field: no tunnel, no NTP time, no map tiles through Paula.</li>
+  <li>The Wally board with 433 MHz LoRa antenna, plus its USB cable to the Pi.</li>
+  <li>A keyboard and screen for the Pi, for sections 3&ndash;5.</li>
+  <li>Ari's computer, with:
+    <ul>
+      <li><code>arduino-cli</code> and the ESP32 core <code>esp32:esp32</code>;</li>
+      <li>the libraries folder <code>ProjectsSupport/Esp32ArduinoLib/libraries</code>;</li>
+      <li><code>openssl</code>;</li>
+      <li>the Digital Stables root certificate in <code>~/DigitalStablesCA</code> (made the first time in section 7).</li>
+    </ul></li>
+  <li>The office WiFi and the NUC (192.168.1.138) reachable during setup.</li>
+  <li>For a customer's Paula: one of the customer's own Daffodils, to copy its secret (section 9).</li>
+</ul>
+
+<h2>3. Prepare the Raspberry Pi</h2>
+<h3><span class="where w-pc">COMPUTER</span> 3.1 Flash the SD card</h3>
+<p>Use Raspberry Pi Imager to write <strong>Raspberry Pi OS Trixie (64-bit)</strong>. Lite is fine, since no desktop is needed. Enable SSH and set a username/password (use <code>pi</code>: the scripts and paths assume <code>/home/pi</code>). Leave the hostname and WiFi blank. They are set in the next step, which is more reliable than the Imager's fields.</p>
+
+<h3><span class="where w-pi">PI</span> 3.2 First boot: <code>sudo raspi-config</code>, in this order</h3>
+<ol>
+  <li><strong>Localisation Options &rarr; WLAN Country</strong> (Australia). Do this first: the radio does not transmit at all until a country is set.</li>
+  <li><strong>System Options &rarr; Hostname</strong>, e.g. <code>paula4</code>. It becomes the hotspot name, the <code>.local</code> address (<code>paula4.local</code>) and the name in its HTTPS certificate. Choose it carefully. If you change it later, make a new certificate (section 7).</li>
+  <li><strong>System Options &rarr; Wireless LAN</strong>: join the office/factory WiFi, which gives internet during setup. The provisioning script also detects it and saves it for the USB dongle.</li>
+  <li>Finish, reboot if asked, and check that <code>ip a show wlan0</code> shows an address.</li>
+</ol>
+
+<h2>4. <span class="where w-pi">PI</span> Run the provisioning script</h2>
+<p>Run this on the Pi's own keyboard and screen, <strong>not over SSH</strong>. The script reconfigures the network and reboots at the end, so an SSH session drops partway through.</p>
+<pre>sudo apt-get update &amp;&amp; sudo apt-get install -y git
+git clone https://github.com/arifainchtein/PaulaUploader.git
+cd PaulaUploader
+chmod +x provision-pi.sh
+./provision-pi.sh</pre>
+<p>The script:</p>
+<ul>
+  <li>prints the commit it runs from first; check that it matches the latest on GitHub;</li>
+  <li>installs the JDK, Maven, Postgres, Python, hostapd/dnsmasq/iptables;</li>
+  <li>sets up SSH, passwordless sudo for <code>pi</code>, and serial port access (<code>dialout</code> group);</li>
+  <li>builds PaulaUploader into <code>~/paulauploader</code>;</li>
+  <li>installs Tomcat 8.5.100 in <code>~/pauladeployer/tomcat</code>, then clones and builds PaulaDeployer into it, and installs the <code>pauladeployer-tomcat</code> service;</li>
+  <li>sets up the field hotspot on <code>wlan0</code> and the client on <code>wlan1</code>;</li>
+  <li>adds the port redirects 80&rarr;8080 and 443&rarr;8443 to <code>/etc/rc.local</code>, then reboots.</li>
+</ul>
+<p>Options are set as variables in front of the command (all documented at the top of <code>provision-pi.sh</code>):</p>
+<pre>FIELD_PASSWORD='hotspot-password'  ./provision-pi.sh      # WPA2 hotspot instead of an open one
+FACTORY_WIFI_SSID='OfficeWifi' FACTORY_WIFI_PASSWORD='...' ./provision-pi.sh</pre>
+<p><strong>For a field Paula, give the phone hotspot and the Factory tunnel address in the same run</strong> (section 8 explains both):</p>
+<pre>FIELD_PASSWORD='...' FACTORY_WIFI_PASSWORD='...' \
+PHONE_HOTSPOT_SSID='Ari’s iPhone' PHONE_HOTSPOT_PASSWORD='...' \
+FACTORY_TUNNEL_IP=10.98.0.4 \
+./provision-pi.sh</pre>
+<p>The office WiFi joined in 3.2 is used for <code>wlan1</code> automatically, but its password is never detected. For a secured network, give <code>FACTORY_WIFI_PASSWORD</code>.</p>
+<p>At the end the script says HTTPS is not set up yet; that is section 7. The Pi reboots, which takes 30&ndash;45 s.</p>
+
+<h2>5. <span class="where w-pi">PI</span> Trust the Pi on the NUC (once per Pi)</h2>
+<p>On a new Pi the first run always skips the esptool/bootloader download, because the Pi's SSH key is not trusted on the NUC yet. After the reboot:</p>
+<pre>ssh-copy-id -i ~/.ssh/chilhuacle.pub ari@192.168.1.138    # NUC password once
+cd ~/PaulaUploader &amp;&amp; ./provision-pi.sh                    # second run: only the esptool fetch is new</pre>
+<p>Every step of the script is safe to repeat.</p>
+
+<h2>6. <span class="where w-pc">COMPUTER</span> Flash Paula's ESP32 (Wally) with Paula.ino</h2>
+<p>Plug Wally into the computer by USB and run:</p>
+<pre>cd ~/Data/DigitalStables/Projects/Paula
+arduino-cli compile --fqbn esp32:esp32:esp32 \
+  --libraries ~/Data/DigitalStables/ProjectsSupport/Esp32ArduinoLib/libraries .
+arduino-cli upload  --fqbn esp32:esp32:esp32 --port /dev/ttyUSB0 .
+arduino-cli monitor --port /dev/ttyUSB0 --config baudrate=115200   # optional: watch it boot</pre>
+<p>Notes:</p>
+<ul>
+  <li>Board <code>esp32:esp32:esp32</code>, 4 MB flash; the sketch uses about 91 %.</li>
+  <li>LoRa runs at 433 MHz, SF9, 125 kHz, with CRC on. Every device on the farm must match these settings.</li>
+  <li>The Arduino IDE works too, with the same board and libraries.</li>
+</ul>
+<p>Then plug Wally into the <strong>Pi</strong>. To check that the Pi sees it, run on the Pi:</p>
+<pre>java -jar ~/paulauploader/target/paulauploader.jar diagnose-ports    # should name Wally's port</pre>
+<div class="note">Paula identifies packets by their size only. If any LoRa struct changes size, check that no two structs end up the same size (see the Paula project's <code>CLAUDE.md</code>).</div>
+
+<h2>7. HTTPS: certificate and phones</h2>
+<p><strong>Why:</strong> phones only give their GPS to <code>https</code> pages. An iPhone has no way around this. The Nearby Devices map uses the phone's GPS as Paula's position, so without HTTPS the map works, but you have to tap the map to show where you are.</p>
+<p><strong>How:</strong> Digital Stables runs its own small certificate authority.</p>
+<ul>
+  <li>One <strong>root certificate</strong> lives on Ari's computer. Each phone installs and trusts it once.</li>
+  <li>Each Paula gets a certificate signed by that root, for <code>&lt;hostname&gt;.local</code>, <code>&lt;hostname&gt;</code> and <code>192.168.50.1</code>.</li>
+</ul>
+<p>After that, <code>https://paula4.local/</code> opens with no warnings. It needs no internet, no domain and no renewal for 825 days (the longest an iPhone accepts).</p>
+<p>The scripts are in the PaulaUploader repository, folder <code>https/</code>:</p>
+<table>
+  <tr><th>Script</th><th>Where</th><th>What it does</th></tr>
+  <tr><td><code>make-paula-cert.sh</code></td><td>Computer</td><td>Creates the root certificate on its first run, signs a certificate for one Paula and packs it as <code>paula-https.p12</code> for Tomcat. With <code>--install</code> it also copies the file to the Pi and runs the next script there.</td></tr>
+  <tr><td><code>enable-https.sh</code></td><td>Pi</td><td>Adds an HTTPS connector on port 8443 to Tomcat's <code>server.xml</code> (only once; it backs up the original first). Redirects 443&rarr;8443, now and at every boot, then restarts Tomcat and checks that HTTPS answers. Plain http keeps working.</td></tr>
+</table>
+
+<h3><span class="where w-pc">COMPUTER</span> 7.1 Make and install the Paula's certificate</h3>
+<p>The Pi must be on the same network as the computer, and its PaulaUploader checkout must be up to date: <code>cd ~/paulauploader &amp;&amp; git pull</code> on the Pi.</p>
+<pre>cd ~/Data/DigitalStables/PaulaUploader/https
+./make-paula-cert.sh paula4 --install</pre>
+<ul>
+  <li>The first time ever, this also creates <code>~/DigitalStablesCA/rootCA.key</code> and <code>rootCA.crt</code>.</li>
+  <li>To reach the Pi by IP instead of <code>paula4.local</code>: <code>PI_ADDRESS=192.168.1.50 ./make-paula-cert.sh paula4 --install</code></li>
+  <li>To add another name or IP to the certificate, list it after the hostname: <code>./make-paula-cert.sh paula4 172.20.10.2 --install</code></li>
+  <li>Without <code>--install</code>, the script prints the two manual commands (an <code>scp</code> and an <code>ssh</code>).</li>
+</ul>
+<p>Success ends with: <code>HTTPS is up: https://paula4.local/ and https://192.168.50.1/</code>.</p>
+<div class="warn"><strong>Back up <code>~/DigitalStablesCA/rootCA.key</code></strong> somewhere safe and private. Anyone with it can make certificates that every Digital Stables phone trusts. If it is lost, a new root has to be made and installed again on every phone, and every Paula needs a new certificate.</div>
+
+<h3><span class="where w-phone">PHONE</span> 7.2 Install the root certificate on a phone (once per phone)</h3>
+<p>Send <code>~/DigitalStablesCA/rootCA.crt</code> to the phone, by AirDrop, email or a download link.</p>
+<p><strong>iPhone</strong></p>
+<ol>
+  <li>Open the file. iOS says "Profile Downloaded".</li>
+  <li><em>Settings &rarr; General &rarr; VPN &amp; Device Management</em> &rarr; <em>Digital Stables Paula Root CA</em> &rarr; <strong>Install</strong>.</li>
+  <li><em>Settings &rarr; General &rarr; About &rarr; Certificate Trust Settings</em> &rarr; switch on <strong>full trust</strong> for <em>Digital Stables Paula Root CA</em>. This step is easy to forget, and without it the certificate does nothing.</li>
+</ol>
+<p><strong>Android</strong></p>
+<ul>
+  <li><em>Settings &rarr; Security &rarr; Encryption &amp; credentials &rarr; Install a certificate &rarr; CA certificate</em>, then choose <code>rootCA.crt</code>. The menu names vary by brand; searching Settings for "certificate" finds it.</li>
+  <li>Chrome on Android uses it straight away.</li>
+</ul>
+<p><strong>Computer (optional, for testing)</strong></p>
+<ul>
+  <li>Linux Chrome: <em>Settings &rarr; Privacy and security &rarr; Security &rarr; Manage certificates &rarr; Authorities &rarr; Import</em>, tick "Trust this certificate for identifying websites".</li>
+</ul>
+
+<h3><span class="where w-phone">PHONE</span> 7.3 Check</h3>
+<p>Open <code>https://paula4.local/</code>. It should load with a normal padlock and no warning. Then press <strong>Nearby Devices</strong>: the phone asks to share its location; allow it.</p>
+
+<h3>7.4 Renewing and changing</h3>
+<ul>
+  <li>The certificate lasts 825 days, and <code>enable-https.sh</code> prints the expiry date. To renew, re-run <code>./make-paula-cert.sh paula4 --install</code>; phones need nothing new.</li>
+  <li>If the Pi's hostname changes, make a new certificate for the new name.</li>
+  <li>The root certificate is valid for 10 years. The script never remakes it while <code>rootCA.key</code> exists.</li>
+  <li>If <code>provision-pi.sh</code> is re-run on a Pi that already has <code>paula-https.p12</code>, it turns HTTPS on again by itself.</li>
+</ul>
+
+<h2>8. Field networking: phone hotspot and Factory tunnel</h2>
+<p>In the field, <code>wlan1</code> joins the phone's 4G hotspot. This gives Paula internet (NTP time, Stream 2 Chat through the Factory tunnel), and the phone reaches PaulaDeployer on the same hotspot. Map imagery is downloaded by the phone itself.</p>
+
+<h3><span class="where w-pi">PI</span> 8.1 The phone's hotspot</h3>
+<p><code>provision-pi.sh</code> adds the phone's hotspot to <code>wlan1</code> when given <code>PHONE_HOTSPOT_SSID</code> and <code>PHONE_HOTSPOT_PASSWORD</code>:</p>
+<ul>
+  <li>the home/factory WiFi gets <code>priority=10</code> and the hotspot <code>priority=1</code>, so Paula uses the home WiFi whenever it can see it, and the phone otherwise;</li>
+  <li>the hotspot name is written in hex. An iPhone's name contains a curly apostrophe (<code>Ari’s iPhone</code>) that has to match byte for byte, so copy it from the phone (<em>Settings &rarr; General &rarr; About &rarr; Name</em>) rather than typing it;</li>
+  <li>on the iPhone, turn on <em>Personal Hotspot &rarr; Maximize Compatibility</em>, so the hotspot uses 2.4 GHz, which every Pi can see.</li>
+</ul>
+<p>To add or change it later by hand: <code>sudo nano /etc/wpa_supplicant/wpa_supplicant.conf</code> and add a <code>network={ ... priority=1 }</code> block. To get the exact name, scan from the Pi: <code>sudo iw dev wlan1 scan | grep SSID</code>.</p>
+<p>PaulaDeployer's <strong>(i)</strong> popup shows which network <code>wlan1</code> is on, and has buttons to force one network or go back to Automatic. That helps at the edge of the home WiFi's range.</p>
+
+<h3>8.2 Factory tunnel (for Stream 2 Chat from the paddock)</h3>
+<p>Away from home, Paula reaches the FactoryChat broker (FACTORY2, 192.168.1.138:1883) through WireGuard:</p>
+<pre>iPhone hotspot ── Paula ══ WireGuard ══ chilhuacle relay ══ OpenWrt One (wg_remote) ── FACTORY2:1883</pre>
+<p>Each Paula needs its own <strong>tunnel address</strong>, <code>10.98.0.N</code>. Taken so far: .1 the router, .2 Ari's phone, .3 Paula3. Use .4 for the next Paula and keep a list.</p>
+
+<h3><span class="where w-pi">PI</span> 8.2.1 On the Pi: done by provision-pi.sh</h3>
+<p>With <code>FACTORY_TUNNEL_IP=10.98.0.N</code>, the script:</p>
+<ul>
+  <li>installs <code>wireguard-tools</code>;</li>
+  <li>makes the Paula's WireGuard key on the Pi. A re-run keeps the existing key, because the router knows the Paula by it;</li>
+  <li>writes <code>/etc/wireguard/factory.conf</code>. Only FACTORY2 and the router's tunnel address go through the tunnel; everything else (map tiles, NTP) uses the hotspot directly;</li>
+  <li>installs <code>/usr/local/sbin/factory-tunnel</code> with <code>factory-tunnel.timer</code>, which runs it every 15 s:
+    <ul>
+      <li>on the home WiFi (<code>MainRouter24</code>/<code>MainRouter</code>, or <code>FACTORY_HOME_SSIDS</code>) it keeps the tunnel <strong>down</strong>, so chat goes straight over the LAN and works even with the satellite link down;</li>
+      <li>on any other network it brings the tunnel <strong>up</strong>;</li>
+      <li>after a network change it renews the DHCP address;</li>
+    </ul></li>
+  <li>leaves the public key and address in <code>~/factory-tunnel.pub</code> for the router step.</li>
+</ul>
+<p>Its log: <code>journalctl -t factory-tunnel</code>.</p>
+
+<h3><span class="where w-pc">COMPUTER</span> 8.2.2 On the router: add-paula-to-router.sh (once per Paula)</h3>
+<p>The router has to know the new Paula. From the computer, on the home network:</p>
+<pre>cd ~/Data/DigitalStables/PaulaUploader/tunnel
+./add-paula-to-router.sh paula4          # or: PAULA_ADDRESS=192.168.1.171 ./add-paula-to-router.sh paula4</pre>
+<p>It reads <code>~/factory-tunnel.pub</code> from the Pi, then on the OpenWrt One (<code>root@192.168.1.1</code>, key <code>~/.ssh/chilhuacle</code>):</p>
+<ul>
+  <li><strong>adds the peer</strong> to <code>wg_remote</code>. It is saved with <code>uci</code> and added live with <code>wg set</code>, so there is no network restart and the house WiFi stays up;</li>
+  <li><strong>adds a firewall door</strong>, <code>Cleotilde-Door-FactoryChat-Paula4</code>, that lets this Paula's address reach only 192.168.1.138 tcp 1883, then reloads the firewall;</li>
+  <li>refuses if the address already belongs to another peer, and prints the commands to undo it.</li>
+</ul>
+<p>The chilhuacle relay needs nothing per Paula. Optionally, add the address to <code>~/Teleonome/TunnelPeers.json</code> on the Teleonome Pi so the Network Rules panel shows the name.</p>
+<p><strong>Test in the field:</strong> hotspot on, and Paula joins it within about 15 s. The tunnel comes up within another 15 s (<code>journalctl -t factory-tunnel</code> says "tunnel up"), the router's <code>wg show wg_remote</code> shows a recent handshake, and Stream 2 Chat works. Full design: doc 07, <code>/home/ari/Data/OpenWrtOne/documents/07-network-rules-design.md</code>.</p>
+
+<h3>8.3 How the phone reaches PaulaDeployer</h3>
+<table>
+  <tr><th>Phone is on</th><th>Open</th><th>Notes</th></tr>
+  <tr><td>Paula's own hotspot (SSID = hostname)</td><td><code>https://192.168.50.1/</code></td><td>Always works. The phone has no internet this way, so the map has no imagery: devices and lines still show, on a grey background.</td></tr>
+  <tr><td>The phone's own 4G hotspot (Paula joined it)</td><td><code>https://paula4.local/</code></td><td>Map imagery comes over 4G. If <code>.local</code> doesn't resolve, use the <code>wlan1</code> address shown in the (i) popup with <code>http://</code>; the certificate has no hotspot IP unless it was added in 7.1.</td></tr>
+  <tr><td>Home/office WiFi</td><td><code>https://paula4.local/</code></td><td>For bench work.</td></tr>
+</table>
+
+<h2>9. Paula's secret and clock</h2>
+<p>Paula's commands to Daffodils (WiFi on/off) carry a TOTP code made from the <strong>customer's secret</strong>, and Paula only accepts weather forecasts carrying a valid code. A Daffodil rejects any command whose code is wrong, or whose time is more than 15 minutes off its own clock.</p>
+<p><span class="where w-phone">PHONE</span> In PaulaDeployer &rarr; <strong>Nearby Devices</strong>, below the list:</p>
+<ol>
+  <li>Plug one of the customer's Daffodils into the Pi (jumper on <strong>USB</strong>).</li>
+  <li>Press <strong>Check</strong>, then <strong>Copy secret to Paula</strong> if it says different. The secret itself is never shown.</li>
+  <li><strong>Paula's clock</strong> is shown above it. The Pi sets Paula's clock each time it opens the port, but only when the Pi's own clock is internet-synced. If the Pi isn't synced, press <strong>Set Pi Time</strong> in the header, then <strong>Set Paula's clock</strong>.</li>
+</ol>
+<div class="ok">When the secret and clock are right, Paula's LEDs 2&ndash;3 turn green within a few minutes, once Annabelle's next weather forecast is received with a valid code.</div>
+
+<h2>10. Final checks</h2>
+<table>
+  <tr><th>Check</th><th>Expected</th></tr>
+  <tr><td>Join the hotspot (SSID = hostname), then <code>ssh pi@192.168.50.1</code></td><td>Logs in</td></tr>
+  <tr><td><code>java -jar ~/paulauploader/target/paulauploader.jar diagnose-ports</code></td><td>No Java error; Wally's port named</td></tr>
+  <tr><td><code>ls ~/.arduino15/packages/esp32/tools/esptool_py/3.0.0/esptool.py</code></td><td>Exists (section 5 worked)</td></tr>
+  <tr><td><code>https://paula4.local/</code> on a phone with the root certificate</td><td>Padlock, no warning, PaulaDeployer loads</td></tr>
+  <tr><td><code>http://192.168.50.1/</code></td><td>Still loads (plain http keeps working)</td></tr>
+  <tr><td>Nearby Devices</td><td>Map with the Paula logo at your position; devices start appearing as they send</td></tr>
+  <tr><td>Nearby Devices &rarr; Check secret</td><td>"Paula has the same secret"</td></tr>
+  <tr><td>Factory webapp &rarr; Products &rarr; Send Deploy Package</td><td>The new Paula is listed as reachable within a few minutes (it registers itself)</td></tr>
+  <tr><td>On the phone's hotspot: <code>journalctl -t factory-tunnel</code> on Paula</td><td>"tunnel up" within ~30 s; Stream 2 Chat reaches a chat</td></tr>
+  <tr><td>(i) popup</td><td>wlan0/wlan1 addresses, Wi-Fi network, tunnel state, version 0.9.1 or later</td></tr>
+</table>
+
+<h2>11. Using the Nearby Devices map</h2>
+<p>The question it answers: <strong>can a device placed here get its packets to Annabelle, the gateway?</strong> Open it from the <strong>Nearby Devices</strong> button.</p>
+<ul>
+  <li><strong>Annabelle banner (top).</strong> How strongly Paula hears Annabelle's weather forecast at this spot:
+    <ul>
+      <li>green: strong, a device here should reach Annabelle;</li>
+      <li>amber: fair, little margin;</li>
+      <li>red: weak, the device may need a relay;</li>
+      <li>grey: not heard yet. Forecasts go out every few minutes; nothing after about 10 minutes means Annabelle doesn't reach this spot.</li>
+    </ul>
+    This is a strong hint, not proof, because Annabelle may transmit more strongly than a Daffodil. The planned "ping" (phase 2) will confirm both directions.</li>
+  <li><strong>Map.</strong> The Paula logo marks your phone's position. Each device sits where its data packets say it is: Daffodil, Langley, Chinampa and Gloria all broadcast their coordinates.
+    <ul>
+      <li>A line runs from where you were when Paula heard the device to the device, coloured by signal strength.</li>
+      <li>Lines fade after 3 minutes and become dashed after 15 minutes, since you have probably moved since.</li>
+      <li>The view follows new devices until you drag the map; <strong>Show all</strong> brings it back.</li>
+    </ul></li>
+  <li><strong>List.</strong> Signal bars, RSSI/SNR, time since last heard, packet count and distance. Daffodils keep their <strong>WiFi on/off</strong> button, which keeps the device awake with WiFi for 15 minutes, as before.</li>
+  <li><strong>Save here.</strong> Standing next to a device, this sets its map position to yours. Use it for Annabelle (its forecast carries no position) and for any device with missing or wrong coordinates. A saved position overrides the broadcast one until you press <strong>Clear</strong>. Saved positions are kept on the Pi in <code>/home/pi/paulauploader/signalmap-positions.json</code>.</li>
+  <li><strong>Capture file.</strong> Every session is saved under <code>captures/lorasniffer/</code> (linked at the bottom of the screen). Each packet line includes the device's position and yours, for example <code>at -37.13,144.47 paula -37.13,144.47 ~5m</code>, so a walk can be read back later.</li>
+</ul>
+<p>Signal cut-offs (SF9, sensitivity about &minus;126 dBm): green &ge; &minus;95 dBm, amber &minus;95 to &minus;110, red below &minus;110. Signal bars: 4 at &ge; &minus;85, 3 at &ge; &minus;95, 2 at &ge; &minus;110, otherwise 1.</p>
+<h3>11.1 Ping from here</h3>
+<p>The banner is a hint; the ping is the test. The blue <strong>Ping from here</strong> button makes Paula send one ping to every device. Every device that is listening answers within about 5 seconds and reports:</p>
+<ul>
+  <li><strong>how strongly it heard the ping</strong>, which is how a device placed where you stand would be heard;</li>
+  <li>for Daffodils, <strong>how well it hears Annabelle</strong> (from its last weather forecast), so it can be judged as a relay;</li>
+  <li>its own position, so it lands on the map even without "Save here".</li>
+</ul>
+<p>The ping goes out at <strong>5 dBm</strong> by default: the power of a Daffodil, Langley or Gloria. Paula and Annabelle normally use 17 dBm, about 12 dB stronger, which would make every spot look better than it is. Choose 17 dBm in the selector only to test for a 17 dBm device (Chinampa).</p>
+<p>The verdict panel says one of:</p>
+<table>
+  <tr><th>Verdict</th><th>Meaning</th></tr>
+  <tr><td>&#10003; A device here reaches Annabelle (green / amber / red by margin)</td><td>Annabelle answered. The RSSI it heard the ping at is the uplink a device here would have.</td></tr>
+  <tr><td>&#8644; Annabelle did not answer - a relay is needed here (purple)</td><td>Other devices heard the ping and also hear Annabelle. The best relay is named: the one whose weaker link (ping or Annabelle) is strongest.</td></tr>
+  <tr><td>&#10007; Annabelle did not answer / Nobody answered (grey)</td><td>No listening device heard this spot.</td></tr>
+</table>
+<p>On the map, each answer gets a thick line from where you pinged, coloured by how the device heard you. A relay's own link to Annabelle is drawn dotted. Each ping leaves a dot at its spot in the verdict's colour, so walking around and pinging builds a coverage map. Every ping and answer is also written to the capture file (<code>PING #n</code> and <code>answers PING #n</code> lines).</p>
+<p><strong>Who answers:</strong> Annabelle, and Daffodils and Langleys that are awake. A sleeping Daffodil or Langley only listens for a few seconds after its VitalSigns, so it almost never answers. Chinampa and Gloria don't answer yet, since their firmware doesn't have the ping. Firmware older than this ignores pings safely.</p>
+<p><strong>Firmware needed:</strong> <code>Paula.ino</code> (Version 1 or later), <code>Annabelle.ino</code> (Version 12 or later), and <code>Daffodil.ino</code> and <code>Langley.ino</code> from 3 November 2026 or later, built with the library files <code>LinkAckRecord.h</code> and <code>DeviceCommandRecord.h</code> (which has the new <code>DEVICE_COMMAND_PING</code>). Pings carry a code from the customer's secret and Paula's time, like the WiFi commands, so Paula's secret and clock must be right (section 9).</p>
+
+<p>Sleeping Daffodils only show up when they wake and send. Devices Paula heard before the screen opened are listed from Paula's own table, marked "before this screen", without a line.</p>
+
+<h2>12. Updating a Paula later</h2>
+<table>
+  <tr><th>What</th><th>How</th></tr>
+  <tr><td>PaulaDeployer</td><td><span class="where w-pc">COMPUTER</span> commit and push. <span class="where w-pi">PI</span> <code>cd ~/pauladeployer-src &amp;&amp; git pull &amp;&amp; mvn package -Dmaven.antrun.skip=true &amp;&amp; cp target/ROOT.war ~/pauladeployer/tomcat/webapps/ROOT.war &amp;&amp; sudo systemctl restart pauladeployer-tomcat</code>. Always restart the service rather than relying on a hot redeploy (jSerialComm can only load once per process). New files must be <code>git add</code>-ed: a missing <code>leaflet.css</code> breaks the map.</td></tr>
+  <tr><td>PaulaUploader</td><td><span class="where w-pi">PI</span> <code>cd ~/paulauploader &amp;&amp; git pull &amp;&amp; mvn package</code></td></tr>
+  <tr><td>Paula.ino (Wally)</td><td><span class="where w-pc">COMPUTER</span> as in section 6</td></tr>
+  <tr><td>HTTPS certificate</td><td><span class="where w-pc">COMPUTER</span> <code>./make-paula-cert.sh &lt;hostname&gt; --install</code> (section 7.4)</td></tr>
+</table>
+<p>After a PaulaDeployer update the page loads fresh by itself: the <code>?v=</code> tags on its CSS and JS change with each version.</p>
+
+<h2>13. Troubleshooting</h2>
+<h3>Map and HTTPS</h3>
+<table>
+  <tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+  <tr><td>Map tiles scattered or overlapping all over the screen</td><td><code>assets/leaflet/leaflet.css</code> not deployed (it was left out of a commit once)</td><td><code>git add src/main/webapp/assets/leaflet</code>, push, update the Pi, hard-refresh</td></tr>
+  <tr><td>"Phone location blocked - this page is http"</td><td>Page opened with <code>http://</code></td><td>Use the <code>https://</code> link in the note; install the root certificate if not done (7.2)</td></tr>
+  <tr><td>Certificate warning on <code>https://</code></td><td>Root not installed or not trusted on this phone; or the address used isn't in the certificate</td><td>iPhone: Certificate Trust Settings switch (7.2). Use <code>&lt;hostname&gt;.local</code> or <code>192.168.50.1</code>, or add the address (7.1)</td></tr>
+  <tr><td>"Phone location blocked - allow location" on <code>https://</code></td><td>Location permission refused earlier</td><td>iPhone: <em>Settings &rarr; Privacy &rarr; Location Services &rarr; Safari/Chrome &rarr; While Using</em>, and allow the site</td></tr>
+  <tr><td><code>https://</code> doesn't answer at all</td><td>No connector or no 443 redirect (e.g. rc.local not run)</td><td>On the Pi: <code>bash ~/paulauploader/https/enable-https.sh</code>; it reports the problem. Tomcat log: <code>~/pauladeployer/tomcat/logs/catalina.out</code></td></tr>
+  <tr><td>Tomcat won't start after enabling HTTPS</td><td><code>server.xml</code> damaged</td><td>Restore <code>conf/server.xml.before-https</code> and re-run <code>enable-https.sh</code></td></tr>
+  <tr><td>Map grey, no imagery</td><td>The phone has no internet (e.g. on Paula's own hotspot)</td><td>Use the phone's 4G hotspot (8.3). Devices and lines still work</td></tr>
+  <tr><td>Device in the list but not on the map</td><td>It broadcasts no position (0,0, or a type without one, e.g. Seedling)</td><td>Stand next to it and press <strong>Save here</strong>; or set its GPS on the device's own web page</td></tr>
+  <tr><td>Annabelle never appears</td><td>Out of range, or Paula's secret is wrong (forecasts with a bad code are ignored)</td><td>Check the secret (section 9); compare with the Lora Sniffer, which shows "BAD CODE"</td></tr>
+  <tr><td>Stream 2 Chat fails away from home</td><td>Tunnel not up, or the router doesn't know this Paula</td><td><code>journalctl -t factory-tunnel</code> on Paula; <code>wg show wg_remote</code> on the router. Run <code>add-paula-to-router.sh</code> if the Paula's key isn't listed (8.2.2)</td></tr>
+  <tr><td>Paula never joins the phone's hotspot</td><td>Name mismatch (curly apostrophe), or the hotspot is on 5 GHz</td><td>Copy the name from the phone; turn on Maximize Compatibility (8.1)</td></tr>
+  <tr><td>Ping: nobody answers, even next to Annabelle</td><td>Old firmware on Annabelle/Paula, wrong secret, or Paula's clock more than 15 min off (pings are rejected like commands)</td><td>Flash the 3 Nov 2026 firmware; section 9 for secret and clock</td></tr>
+  <tr><td>Ping button: "Paula did not answer"</td><td>Paula.ino older than the ping</td><td>Flash Paula.ino (section 6)</td></tr>
+  <tr><td>WiFi on/off never completes</td><td>Paula's clock more than 15 minutes off, wrong secret, or the device is asleep</td><td>Section 9; a sleeping device answers when it next wakes</td></tr>
+</table>
+<h3>Provisioning (from the PaulaUploader README)</h3>
+<table>
+  <tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+  <tr><td>Field hotspot comes up, then drops seconds later</td><td>A failing command in <code>rc.local</code> made the whole script exit; systemd killed its processes</td><td>Every <code>rc.local</code> line is guarded with <code>|| true</code>; <code>iptables</code> must be installed</td></tr>
+  <tr><td>USB WiFi never comes up, ifup/ifdown hang</td><td><code>allow-hotplug</code> on the dongle races <code>rc.local</code></td><td>No <code>allow-hotplug</code> for the dongle</td></tr>
+  <tr><td><code>Operation not possible due to RF-kill</code></td><td>NetworkManager disabled, so nothing clears rfkill</td><td><code>rfkill unblock all</code> (in <code>rc.local</code>)</td></tr>
+  <tr><td>wlan0 and wlan1 swap after reboots</td><td>Kernel naming order not fixed</td><td>The udev rule pins the built-in radio to <code>wlan0</code></td></tr>
+  <tr><td>Provisioning hangs 30+ minutes, SSH dies</td><td>Network work after NetworkManager was disabled</td><td>All downloads run before NetworkManager is touched; run from the Pi's own keyboard</td></tr>
+  <tr><td>esptool/bootloader fetch skipped</td><td>Pi's key not trusted on the NUC</td><td>Section 5</td></tr>
+  <tr><td>Paula "not reachable" in the factory dropdown</td><td>Registered without <code>.local</code></td><td>Fixed in current code (appends <code>.local</code>)</td></tr>
+  <tr><td>Flash "succeeds" but the device wasn't flashed</td><td><code>upload.sh</code> without <code>set -e</code></td><td>Fixed: every generated <code>upload.sh</code> has <code>set -e</code></td></tr>
+</table>
+
+<h2>14. Reference</h2>
+<table>
+  <tr><th>Item</th><th>Value</th></tr>
+  <tr><td>Paula hotspot address</td><td><code>192.168.50.1</code> (DHCP 192.168.50.10&ndash;100)</td></tr>
+  <tr><td>PaulaDeployer</td><td><code>http://</code> :80&rarr;8080, <code>https://</code> :443&rarr;8443; service <code>pauladeployer-tomcat</code></td></tr>
+  <tr><td>Tomcat</td><td><code>~/pauladeployer/tomcat</code> (8.5.100); certificate <code>conf/paula-https.p12</code></td></tr>
+  <tr><td>PaulaDeployer source on the Pi</td><td><code>~/pauladeployer-src</code></td></tr>
+  <tr><td>PaulaUploader on the Pi</td><td><code>~/paulauploader</code> (also holds <code>https/</code> and <code>docs/</code>)</td></tr>
+  <tr><td>Field captures</td><td><code>/home/pi/paulauploader/captures/&lt;kind&gt;/</code>, browsable at <code>/captures/</code></td></tr>
+  <tr><td>Saved map positions</td><td><code>/home/pi/paulauploader/signalmap-positions.json</code></td></tr>
+  <tr><td>Certificate authority</td><td>Ari's computer, <code>~/DigitalStablesCA/</code>: <code>rootCA.key</code> (private), <code>rootCA.crt</code> (for phones), <code>paulas/&lt;hostname&gt;/</code></td></tr>
+  <tr><td>Factory tunnel</td><td>Paula: <code>/etc/wireguard/factory.conf</code>, <code>factory-tunnel.timer</code>, <code>~/factory-tunnel.pub</code>. Addresses 10.98.0.N (.1 router, .2 Ari's phone, .3 Paula3). Endpoint <code>104.154.239.253:51821</code></td></tr>
+  <tr><td>Wally USB ID</td><td>CP2104, 10C4:EA60</td></tr>
+  <tr><td>LoRa</td><td>433 MHz, SF9, BW 125 kHz, CRC on</td></tr>
+  <tr><td>Office NUC</td><td><code>192.168.1.138</code> (user <code>ari</code>)</td></tr>
+</table>
+
+</body>
+</html>
